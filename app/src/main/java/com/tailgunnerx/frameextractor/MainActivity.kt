@@ -2,17 +2,18 @@ package com.tailgunnerx.frameextractor
 
 import android.content.ContentValues
 import android.graphics.Bitmap
-import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
 import android.provider.MediaStore
+import android.view.TextureView
+import android.view.ViewGroup
+import android.widget.FrameLayout
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.interaction.MutableInteractionSource
@@ -26,20 +27,21 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.graphics.vector.path
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.unit.sp
-import kotlinx.coroutines.Dispatchers
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.media3.common.MediaItem
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 // Custom UI Icons built directly so you don't have to download external Google ML/Icon packages!
@@ -109,8 +111,9 @@ class MainActivity : ComponentActivity() {
 @Composable
 fun FrameExtractorApp() {
     val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+
     var videoUri by remember { mutableStateOf<Uri?>(null) }
-    var currentBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var currentPositionMs by remember { mutableStateOf(0L) }
     var videoDurationMs by remember { mutableStateOf(0L) }
     var isExtracting by remember { mutableStateOf(false) }
@@ -122,8 +125,23 @@ fun FrameExtractorApp() {
     var isPlaying by remember { mutableStateOf(false) }
     var playSpeedFps by remember { mutableFloatStateOf(5f) }
 
-    val scope = rememberCoroutineScope()
-    val retriever = remember { MediaMetadataRetriever() }
+    var textureView by remember { mutableStateOf<TextureView?>(null) }
+    var playerSurfaceSet by remember { mutableStateOf(false) }
+
+    val player = remember {
+        ExoPlayer.Builder(context).build()
+    }
+
+    // Pause when activity goes to background
+    LifecycleEventEffect(Lifecycle.Event.ON_PAUSE) {
+        player.pause()
+        isPlaying = false
+    }
+
+    // Release player when composable leaves composition
+    DisposableEffect(Unit) {
+        onDispose { player.release() }
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { isGranted ->
         if (!isGranted) {
@@ -131,92 +149,81 @@ fun FrameExtractorApp() {
         }
     }
 
+    // Player listener – updates UI state from ExoPlayer events
+    DisposableEffect(player) {
+        val listener = object : Player.Listener {
+            override fun onAvailableCommandsChanged(availableCommands: Player.Commands) {
+                if (!playerSurfaceSet && availableCommands.contains(Player.COMMAND_SET_VIDEO_SURFACE)) {
+                    textureView?.let { player.setVideoTextureView(it) }
+                    playerSurfaceSet = true
+                }
+            }
+
+            override fun onEvents(player: Player, events: Player.Events) {
+                super.onEvents(player, events)
+                if (player.duration > 0L) {
+                    videoDurationMs = player.duration
+                    val fps = player.videoFormat?.frameRate ?: 30f
+                    videoFps = fps
+                    msPerFrame = if (fps > 0f) (1000f / fps).toLong().coerceAtLeast(1L) else 33L
+
+                    val w = player.videoFormat?.width ?: 0
+                    val h = player.videoFormat?.height ?: 0
+                    if (w > 0 && h > 0) videoResolution = "${w}x${h}"
+                }
+                isPlaying = player.isPlaying
+                currentPositionMs = player.currentPosition.coerceAtLeast(0L)
+                if (player.playbackState == Player.STATE_ENDED) {
+                    isPlaying = false
+                }
+            }
+        }
+        player.addListener(listener)
+        onDispose { player.removeListener(listener) }
+    }
+
     val pickerLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         if (uri != null) {
             videoUri = uri
             currentPositionMs = 0L
             isPlaying = false
-            retriever.setDataSource(context, uri)
-            videoDurationMs = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)?.toLongOrNull() ?: 0L
-            
-            val w = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_WIDTH) ?: ""
-            val h = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_HEIGHT) ?: ""
-            videoResolution = if (w.isNotEmpty() && h.isNotEmpty()) "${w}x${h}" else "Unknown"
+            videoDurationMs = 0L
+            videoFps = 30f
+            msPerFrame = 33L
+            videoResolution = ""
 
-            val frameCount = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_VIDEO_FRAME_COUNT)?.toLongOrNull()
-            if (frameCount != null && videoDurationMs > 0) {
-                videoFps = frameCount.toFloat() / (videoDurationMs.toFloat() / 1000f)
-            } else {
-                videoFps = 30f 
-            }
-            msPerFrame = (1000f / videoFps).toLong().coerceAtLeast(1L)
+            player.stop()
+            playerSurfaceSet = false
+            player.setMediaItem(MediaItem.fromUri(uri))
+            player.prepare()
+            player.pause()
+            player.seekTo(0L)
         }
     }
 
-    // Single-thread dispatcher serialises all retriever accesses (it is NOT thread-safe).
-    val singleThread = remember { Dispatchers.IO.limitedParallelism(1) }
-
-    // LRU cache keyed by frame index – instant re-display of recently seen frames.
-    val frameCache = remember(videoUri) {
-        object : LinkedHashMap<Long, Bitmap>(16, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Bitmap>): Boolean = size > 16
-        }
-    }
-
-    // Merged decode + playback loop.
-    // Playback: decode → show → wait → advance → repeat  (synchronised – no race).
-    // Paused:   react to manual position changes via snapshotFlow.
-    LaunchedEffect(videoUri, isPlaying, playSpeedFps) {
-        if (videoUri == null) return@LaunchedEffect
-
-        suspend fun decodeAndShow(targetMs: Long) {
-            val key = targetMs / msPerFrame
-            frameCache[key]?.let { currentBitmap = it; return }
-            val frame = withContext(singleThread) {
-                retriever.getFrameAtTime(targetMs * 1000L, MediaMetadataRetriever.OPTION_CLOSEST)
-            }
-            if (frame != null) {
-                frameCache[key] = frame
-                currentBitmap = frame
-            }
-        }
-
-        if (isPlaying) {
-            while (isActive && isPlaying && currentPositionMs < videoDurationMs) {
-                decodeAndShow(currentPositionMs)
-                val delayMs = (1000f / playSpeedFps).toLong().coerceAtLeast(8L)
-                delay(delayMs)
-                if (!isPlaying) break
-                currentPositionMs = (currentPositionMs + msPerFrame).coerceAtMost(videoDurationMs)
-                if (currentPositionMs >= videoDurationMs) isPlaying = false
-            }
-        } else {
-            snapshotFlow { currentPositionMs }
-                .collectLatest { targetMs -> decodeAndShow(targetMs) }
-        }
-    }
-
+    // Long-press: previous frame
     val prevInteractionSource = remember { MutableInteractionSource() }
     val isPrevPressed by prevInteractionSource.collectIsPressedAsState()
-    
-    val nextInteractionSource = remember { MutableInteractionSource() }
-    val isNextPressed by nextInteractionSource.collectIsPressedAsState()
 
     LaunchedEffect(isPrevPressed) {
         if (isPrevPressed && !isPlaying) {
             delay(400)
             while (isActive && isPrevPressed) {
-                currentPositionMs = (currentPositionMs - msPerFrame).coerceAtLeast(0)
+                stepFrame(player, videoDurationMs, msPerFrame, -1)
                 delay((1000f / playSpeedFps).toLong())
             }
         }
     }
 
+    // Long-press: next frame
+    val nextInteractionSource = remember { MutableInteractionSource() }
+    val isNextPressed by nextInteractionSource.collectIsPressedAsState()
+
     LaunchedEffect(isNextPressed) {
         if (isNextPressed && !isPlaying) {
             delay(400)
             while (isActive && isNextPressed) {
-                currentPositionMs = (currentPositionMs + msPerFrame).coerceAtMost(videoDurationMs)
+                stepFrame(player, videoDurationMs, msPerFrame, 1)
                 delay((1000f / playSpeedFps).toLong())
             }
         }
@@ -242,13 +249,13 @@ fun FrameExtractorApp() {
                     Text("$videoResolution • $formattedFps FPS", color = Color.Gray, style = MaterialTheme.typography.bodyMedium)
                 }
             }
-            
-            // Clean Icon Eject Button
+
             if (videoUri != null) {
                 IconButton(
                     onClick = {
+                        player.stop()
+                        playerSurfaceSet = false
                         videoUri = null
-                        currentBitmap = null
                         isPlaying = false
                         currentPositionMs = 0L
                         videoDurationMs = 0L
@@ -264,7 +271,7 @@ fun FrameExtractorApp() {
             }
         }
 
-        // --- IMAGE VIEWER ---
+        // --- VIDEO VIEWER ---
         var scale by remember { mutableFloatStateOf(1f) }
         var offsetX by remember { mutableFloatStateOf(0f) }
         var offsetY by remember { mutableFloatStateOf(0f) }
@@ -284,10 +291,8 @@ fun FrameExtractorApp() {
                 },
             contentAlignment = Alignment.Center
         ) {
-            if (currentBitmap != null) {
-                Image(
-                    bitmap = currentBitmap!!.asImageBitmap(),
-                    contentDescription = "Current Frame",
+            if (videoUri != null) {
+                AndroidView(
                     modifier = Modifier
                         .fillMaxSize()
                         .graphicsLayer {
@@ -295,14 +300,23 @@ fun FrameExtractorApp() {
                             scaleY = scale
                             translationX = offsetX
                             translationY = offsetY
+                        },
+                    factory = {
+                        TextureView(context).apply {
+                            textureView = this
+                            layoutParams = FrameLayout.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT
+                            )
                         }
+                    }
                 )
             } else {
-                Text(if (videoUri == null) "No video selected" else "Loading frame...", color = Color.Gray)
+                Text("No video selected", color = Color.Gray)
             }
         }
 
-        // --- TRADITIONAL MEDIA CONTROL BOARD ---
+        // --- CONTROL BOARD ---
         if (videoUri != null) {
             Surface(
                 color = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
@@ -312,23 +326,25 @@ fun FrameExtractorApp() {
                     modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 16.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
-                    // Frame & Speed Info Array
+                    // Frame & Speed Info
                     Row(
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
                         horizontalArrangement = Arrangement.SpaceBetween
                     ) {
-                        val currentFrame = (currentPositionMs / msPerFrame).toInt() + 1
-                        val totalFrames = (videoDurationMs / msPerFrame).toInt() + 1
+                        val currentFrame = if (msPerFrame > 0) (currentPositionMs / msPerFrame).toInt() + 1 else 1
+                        val totalFrames = if (msPerFrame > 0) (videoDurationMs / msPerFrame).toInt() + 1 else 1
                         Text("Frame $currentFrame / $totalFrames", color = Color.White, style = MaterialTheme.typography.labelLarge)
                         Text("${playSpeedFps.roundToInt()} FPS Speed", color = Color.Gray, style = MaterialTheme.typography.labelLarge)
                     }
 
-                    // Main Timeline Slider
+                    // Timeline Slider
                     Slider(
                         value = currentPositionMs.toFloat(),
-                        onValueChange = { 
-                            currentPositionMs = it.toLong() 
+                        onValueChange = {
+                            currentPositionMs = it.toLong()
                             isPlaying = false
+                            player.pause()
+                            player.seekTo(it.toLong())
                         },
                         valueRange = 0f..(if (videoDurationMs > 0) videoDurationMs.toFloat() else 100f),
                         modifier = Modifier.fillMaxWidth()
@@ -336,18 +352,19 @@ fun FrameExtractorApp() {
 
                     Spacer(modifier = Modifier.height(8.dp))
 
-                    // Player Control Wheel
+                    // Player Controls
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.SpaceBetween,
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        // Extract (Save) Button
+                        // Save Frame
                         FloatingActionButton(
                             onClick = {
-                                if (isExtracting || currentBitmap == null) return@FloatingActionButton
-                                
-                                // Check for legacy permission on older devices (API 28 and below)
+                                if (isExtracting || videoUri == null) return@FloatingActionButton
+                                val tv = textureView ?: return@FloatingActionButton
+
+                                // Storage permission for legacy devices
                                 if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
                                     val permission = android.Manifest.permission.WRITE_EXTERNAL_STORAGE
                                     if (context.checkSelfPermission(permission) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
@@ -358,11 +375,15 @@ fun FrameExtractorApp() {
 
                                 isExtracting = true
                                 isPlaying = false
+                                player.pause()
                                 scope.launch {
                                     try {
-                                        withContext(Dispatchers.IO) {
-                                            saveBitmapToPictures(context, currentBitmap!!, currentPositionMs)
+                                        val bitmap = tv.bitmap
+                                        if (bitmap == null) {
+                                            Toast.makeText(context, "Failed to capture frame", Toast.LENGTH_SHORT).show()
+                                            return@launch
                                         }
+                                        saveBitmapToPictures(context, bitmap, currentPositionMs)
                                         Toast.makeText(context, "Saved frame to Pictures!", Toast.LENGTH_SHORT).show()
                                     } catch (e: Exception) {
                                         e.printStackTrace()
@@ -391,9 +412,10 @@ fun FrameExtractorApp() {
 
                         // Prev Frame
                         IconButton(
-                            onClick = { 
-                                currentPositionMs = (currentPositionMs - msPerFrame).coerceAtLeast(0) 
+                            onClick = {
+                                player.pause()
                                 isPlaying = false
+                                stepFrame(player, videoDurationMs, msPerFrame, -1)
                             },
                             interactionSource = prevInteractionSource,
                             modifier = Modifier.size(48.dp)
@@ -403,13 +425,24 @@ fun FrameExtractorApp() {
 
                         // Play/Pause
                         FloatingActionButton(
-                            onClick = { isPlaying = !isPlaying },
+                            onClick = {
+                                if (isPlaying) {
+                                    player.pause()
+                                    isPlaying = false
+                                } else {
+                                    if (player.playbackState == Player.STATE_ENDED) {
+                                        player.seekTo(0)
+                                    }
+                                    player.play()
+                                    isPlaying = true
+                                }
+                            },
                             containerColor = if (isPlaying) MaterialTheme.colorScheme.secondary else MaterialTheme.colorScheme.primary,
                             modifier = Modifier.size(64.dp),
                             shape = CircleShape
                         ) {
                             Icon(
-                                imageVector = if (isPlaying) PauseIcon else PlayIcon, 
+                                imageVector = if (isPlaying) PauseIcon else PlayIcon,
                                 contentDescription = "Play/Pause",
                                 modifier = Modifier.size(36.dp)
                             )
@@ -417,9 +450,10 @@ fun FrameExtractorApp() {
 
                         // Next Frame
                         IconButton(
-                            onClick = { 
-                                currentPositionMs = (currentPositionMs + msPerFrame).coerceAtMost(videoDurationMs) 
+                            onClick = {
+                                player.pause()
                                 isPlaying = false
+                                stepFrame(player, videoDurationMs, msPerFrame, 1)
                             },
                             interactionSource = nextInteractionSource,
                             modifier = Modifier.size(48.dp)
@@ -438,6 +472,15 @@ fun FrameExtractorApp() {
     }
 }
 
+/** Seek the player one frame forward (+1) or backward (-1). */
+private fun stepFrame(player: ExoPlayer, durationMs: Long, msPerFrame: Long, direction: Int) {
+    val newPos = if (direction > 0)
+        (player.currentPosition + msPerFrame).coerceAtMost(durationMs)
+    else
+        (player.currentPosition - msPerFrame).coerceAtLeast(0L)
+    player.seekTo(newPos)
+}
+
 private fun saveBitmapToPictures(context: android.content.Context, bitmap: Bitmap, timestampMs: Long) {
     val fileName = "ExtractedFrame_${timestampMs}ms.png"
     val contentValues = ContentValues().apply {
@@ -449,7 +492,7 @@ private fun saveBitmapToPictures(context: android.content.Context, bitmap: Bitma
     }
 
     val resolver = context.contentResolver
-    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues) 
+    val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, contentValues)
         ?: throw Exception("Failed to create MediaStore entry")
 
     try {
@@ -459,7 +502,6 @@ private fun saveBitmapToPictures(context: android.content.Context, bitmap: Bitma
             }
         } ?: throw Exception("Failed to open output stream")
 
-        // Force the gallery to see the file immediately
         android.media.MediaScannerConnection.scanFile(
             context,
             arrayOf(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_PICTURES).absolutePath + "/FrameExtractor/" + fileName),
@@ -467,7 +509,6 @@ private fun saveBitmapToPictures(context: android.content.Context, bitmap: Bitma
             null
         )
     } catch (e: Exception) {
-        // Clean up the empty MediaStore entry if writing failed
         resolver.delete(uri, null, null)
         throw e
     }
