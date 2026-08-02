@@ -311,6 +311,12 @@ fun FrameExtractorApp() {
                                 ViewGroup.LayoutParams.MATCH_PARENT
                             )
                         }
+                    },
+                    update = { tv ->
+                        if (!playerSurfaceSet && player.availableCommands.contains(Player.COMMAND_SET_VIDEO_SURFACE)) {
+                            player.setVideoTextureView(tv)
+                            playerSurfaceSet = true
+                        }
                     }
                 )
             } else {
