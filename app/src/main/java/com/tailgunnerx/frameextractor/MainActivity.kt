@@ -151,10 +151,11 @@ fun FrameExtractorApp() {
 
     // Player listener – updates UI state from ExoPlayer events
     DisposableEffect(player) {
+        val exoPlayer = player
         val listener = object : Player.Listener {
             override fun onAvailableCommandsChanged(availableCommands: Player.Commands) {
                 if (!playerSurfaceSet && availableCommands.contains(Player.COMMAND_SET_VIDEO_SURFACE)) {
-                    textureView?.let { player.setVideoTextureView(it) }
+                    textureView?.let { exoPlayer.setVideoTextureView(it) }
                     playerSurfaceSet = true
                 }
             }
@@ -163,12 +164,13 @@ fun FrameExtractorApp() {
                 super.onEvents(player, events)
                 if (player.duration > 0L) {
                     videoDurationMs = player.duration
-                    val fps = player.videoFormat?.frameRate ?: 30f
+                    val fmt = exoPlayer.videoFormat
+                    val fps = fmt?.frameRate ?: 30f
                     videoFps = fps
                     msPerFrame = if (fps > 0f) (1000f / fps).toLong().coerceAtLeast(1L) else 33L
 
-                    val w = player.videoFormat?.width ?: 0
-                    val h = player.videoFormat?.height ?: 0
+                    val w = fmt?.width ?: 0
+                    val h = fmt?.height ?: 0
                     if (w > 0 && h > 0) videoResolution = "${w}x${h}"
                 }
                 isPlaying = player.isPlaying
