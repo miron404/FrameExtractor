@@ -159,13 +159,7 @@ fun FrameExtractorApp() {
             val targetMs = currentPositionMs
             if (targetMs != lastDecodedMs) {
                 lastDecodedMs = targetMs
-                // OPTION_CLOSEST_SYNC is much faster for playback;
-                // use OPTION_CLOSEST for precise stepping when paused.
-                val option = if (isPlaying) {
-                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                } else {
-                    MediaMetadataRetriever.OPTION_CLOSEST
-                }
+                val option = MediaMetadataRetriever.OPTION_CLOSEST
                 val frame = withContext(Dispatchers.IO) {
                     retriever.getFrameAtTime(targetMs * 1000L, option)
                 }
