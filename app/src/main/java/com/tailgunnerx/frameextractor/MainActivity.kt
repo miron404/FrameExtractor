@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -152,36 +153,46 @@ fun FrameExtractorApp() {
         }
     }
 
-    LaunchedEffect(videoUri) {
-        if (videoUri == null) return@LaunchedEffect
-        var lastDecodedMs = -1L
-        while (isActive) {
-            val targetMs = currentPositionMs
-            if (targetMs != lastDecodedMs) {
-                lastDecodedMs = targetMs
-                val option = MediaMetadataRetriever.OPTION_CLOSEST
-                val frame = withContext(Dispatchers.IO) {
-                    retriever.getFrameAtTime(targetMs * 1000L, option)
-                }
-                if (frame != null) {
-                    currentBitmap = frame
-                }
-            }
-            delay(16)
+    // Single-thread dispatcher serialises all retriever accesses (it is NOT thread-safe).
+    val singleThread = remember { Dispatchers.IO.limitedParallelism(1) }
+
+    // LRU cache keyed by frame index – instant re-display of recently seen frames.
+    val frameCache = remember(videoUri) {
+        object : LinkedHashMap<Long, Bitmap>(16, 0.75f, true) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<Long, Bitmap>): Boolean = size > 16
         }
     }
 
-    LaunchedEffect(isPlaying, playSpeedFps) {
+    // Merged decode + playback loop.
+    // Playback: decode → show → wait → advance → repeat  (synchronised – no race).
+    // Paused:   react to manual position changes via snapshotFlow.
+    LaunchedEffect(videoUri, isPlaying, playSpeedFps) {
+        if (videoUri == null) return@LaunchedEffect
+
+        suspend fun decodeAndShow(targetMs: Long) {
+            val key = targetMs / msPerFrame
+            frameCache[key]?.let { currentBitmap = it; return }
+            val frame = withContext(singleThread) {
+                retriever.getFrameAtTime(targetMs * 1000L, MediaMetadataRetriever.OPTION_CLOSEST)
+            }
+            if (frame != null) {
+                frameCache[key] = frame
+                currentBitmap = frame
+            }
+        }
+
         if (isPlaying) {
             while (isActive && isPlaying && currentPositionMs < videoDurationMs) {
+                decodeAndShow(currentPositionMs)
                 val delayMs = (1000f / playSpeedFps).toLong().coerceAtLeast(8L)
                 delay(delayMs)
                 if (!isPlaying) break
                 currentPositionMs = (currentPositionMs + msPerFrame).coerceAtMost(videoDurationMs)
-                if (currentPositionMs >= videoDurationMs) {
-                    isPlaying = false
-                }
+                if (currentPositionMs >= videoDurationMs) isPlaying = false
             }
+        } else {
+            snapshotFlow { currentPositionMs }
+                .collectLatest { targetMs -> decodeAndShow(targetMs) }
         }
     }
 
@@ -194,7 +205,7 @@ fun FrameExtractorApp() {
     LaunchedEffect(isPrevPressed) {
         if (isPrevPressed && !isPlaying) {
             delay(400)
-            while (true) {
+            while (isActive && isPrevPressed) {
                 currentPositionMs = (currentPositionMs - msPerFrame).coerceAtLeast(0)
                 delay((1000f / playSpeedFps).toLong())
             }
@@ -204,7 +215,7 @@ fun FrameExtractorApp() {
     LaunchedEffect(isNextPressed) {
         if (isNextPressed && !isPlaying) {
             delay(400)
-            while (true) {
+            while (isActive && isNextPressed) {
                 currentPositionMs = (currentPositionMs + msPerFrame).coerceAtMost(videoDurationMs)
                 delay((1000f / playSpeedFps).toLong())
             }
