@@ -126,7 +126,6 @@ fun FrameExtractorApp() {
     var playSpeedFps by remember { mutableFloatStateOf(5f) }
 
     var textureView by remember { mutableStateOf<TextureView?>(null) }
-    var playerSurfaceSet by remember { mutableStateOf(false) }
 
     val player = remember {
         ExoPlayer.Builder(context).build()
@@ -153,13 +152,6 @@ fun FrameExtractorApp() {
     DisposableEffect(player) {
         val exoPlayer = player
         val listener = object : Player.Listener {
-            override fun onAvailableCommandsChanged(availableCommands: Player.Commands) {
-                if (!playerSurfaceSet && availableCommands.contains(Player.COMMAND_SET_VIDEO_SURFACE)) {
-                    textureView?.let { exoPlayer.setVideoTextureView(it) }
-                    playerSurfaceSet = true
-                }
-            }
-
             override fun onEvents(player: Player, events: Player.Events) {
                 super.onEvents(player, events)
                 if (player.duration > 0L) {
@@ -195,7 +187,6 @@ fun FrameExtractorApp() {
             videoResolution = ""
 
             player.stop()
-            playerSurfaceSet = false
             player.setMediaItem(MediaItem.fromUri(uri))
             player.prepare()
             player.pause()
@@ -256,7 +247,6 @@ fun FrameExtractorApp() {
                 IconButton(
                     onClick = {
                         player.stop()
-                        playerSurfaceSet = false
                         videoUri = null
                         isPlaying = false
                         currentPositionMs = 0L
@@ -313,10 +303,7 @@ fun FrameExtractorApp() {
                         }
                     },
                     update = { tv ->
-                        if (!playerSurfaceSet && player.availableCommands.contains(Player.COMMAND_SET_VIDEO_SURFACE)) {
-                            player.setVideoTextureView(tv)
-                            playerSurfaceSet = true
-                        }
+                        player.setVideoTextureView(tv)
                     }
                 )
             } else {
