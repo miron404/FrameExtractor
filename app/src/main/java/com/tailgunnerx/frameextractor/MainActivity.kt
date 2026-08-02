@@ -35,8 +35,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
@@ -156,35 +154,27 @@ fun FrameExtractorApp() {
 
     LaunchedEffect(videoUri) {
         if (videoUri == null) return@LaunchedEffect
-        var decodeJob: Job? = null
         var lastDecodedMs = -1L
-
-        // Reactively observe position changes via snapshotFlow (no polling)
-        snapshotFlow { currentPositionMs }
-            .collect { targetMs ->
-                if (targetMs == lastDecodedMs) return@collect
+        while (isActive) {
+            val targetMs = currentPositionMs
+            if (targetMs != lastDecodedMs) {
                 lastDecodedMs = targetMs
-
-                // Cancel any in-flight decode — new position takes priority
-                decodeJob?.cancel()
-                decodeJob = launch(Dispatchers.IO) {
-                    if (!isActive) return@launch
-                    // OPTION_CLOSEST_SYNC is much faster; fall back to OPTION_CLOSEST
-                    // for paused/precise stepping so the user still gets an exact frame.
-                    val option = if (isPlaying) {
-                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
-                    } else {
-                        MediaMetadataRetriever.OPTION_CLOSEST
-                    }
-                    val frame = retriever.getFrameAtTime(targetMs * 1000L, option)
-                    if (!isActive) return@launch
-                    withContext(Dispatchers.Main) {
-                        if (frame != null) {
-                            currentBitmap = frame
-                        }
-                    }
+                // OPTION_CLOSEST_SYNC is much faster for playback;
+                // use OPTION_CLOSEST for precise stepping when paused.
+                val option = if (isPlaying) {
+                    MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                } else {
+                    MediaMetadataRetriever.OPTION_CLOSEST
+                }
+                val frame = withContext(Dispatchers.IO) {
+                    retriever.getFrameAtTime(targetMs * 1000L, option)
+                }
+                if (frame != null) {
+                    currentBitmap = frame
                 }
             }
+            delay(16)
+        }
     }
 
     LaunchedEffect(isPlaying, playSpeedFps) {
