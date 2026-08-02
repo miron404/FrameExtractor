@@ -2,9 +2,12 @@ package com.tailgunnerx.frameextractor
 
 import android.content.ContentValues
 import android.graphics.Bitmap
+import android.media.MediaMetadataRetriever
 import android.net.Uri
 import android.os.Bundle
 import android.os.Environment
+import android.os.Handler
+import android.os.Looper
 import android.provider.MediaStore
 import android.view.TextureView
 import android.view.ViewGroup
@@ -39,9 +42,11 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.media3.common.MediaItem
 import androidx.media3.common.Player
 import androidx.media3.exoplayer.ExoPlayer
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 // Custom UI Icons built directly so you don't have to download external Google ML/Icon packages!
@@ -127,6 +132,9 @@ fun FrameExtractorApp() {
 
     var textureView by remember { mutableStateOf<TextureView?>(null) }
 
+    // Only for saving frames at original resolution and metadata
+    val retriever = remember { MediaMetadataRetriever() }
+
     val player = remember {
         ExoPlayer.Builder(context).build()
     }
@@ -186,11 +194,24 @@ fun FrameExtractorApp() {
             msPerFrame = 33L
             videoResolution = ""
 
+            retriever.setDataSource(context, uri)
+
             player.stop()
             player.setMediaItem(MediaItem.fromUri(uri))
             player.prepare()
             player.pause()
             player.seekTo(0L)
+        }
+    }
+
+    // Periodic position poller during playback (Player.Listener alone
+    // doesn't fire often enough for smooth slider updates).
+    LaunchedEffect(isPlaying) {
+        if (isPlaying) {
+            while (isActive && isPlaying) {
+                currentPositionMs = player.currentPosition.coerceAtLeast(0L)
+                delay(100) // ~10 Hz — smooth slider without overhead
+            }
         }
     }
 
@@ -202,7 +223,7 @@ fun FrameExtractorApp() {
         if (isPrevPressed && !isPlaying) {
             delay(400)
             while (isActive && isPrevPressed) {
-                stepFrame(player, videoDurationMs, msPerFrame, -1)
+                stepFrame(player, currentPositionMs, videoDurationMs, msPerFrame, -1)
                 delay((1000f / playSpeedFps).toLong())
             }
         }
@@ -216,7 +237,7 @@ fun FrameExtractorApp() {
         if (isNextPressed && !isPlaying) {
             delay(400)
             while (isActive && isNextPressed) {
-                stepFrame(player, videoDurationMs, msPerFrame, 1)
+                stepFrame(player, currentPositionMs, videoDurationMs, msPerFrame, 1)
                 delay((1000f / playSpeedFps).toLong())
             }
         }
@@ -357,7 +378,6 @@ fun FrameExtractorApp() {
                         FloatingActionButton(
                             onClick = {
                                 if (isExtracting || videoUri == null) return@FloatingActionButton
-                                val tv = textureView ?: return@FloatingActionButton
 
                                 // Storage permission for legacy devices
                                 if (android.os.Build.VERSION.SDK_INT <= android.os.Build.VERSION_CODES.P) {
@@ -373,12 +393,16 @@ fun FrameExtractorApp() {
                                 player.pause()
                                 scope.launch {
                                     try {
-                                        val bitmap = tv.bitmap
+                                        val bitmap = withContext(Dispatchers.IO) {
+                                            retriever.getFrameAtTime(currentPositionMs * 1000L, MediaMetadataRetriever.OPTION_CLOSEST)
+                                        }
                                         if (bitmap == null) {
-                                            Toast.makeText(context, "Failed to capture frame", Toast.LENGTH_SHORT).show()
+                                            Toast.makeText(context, "Failed to extract frame", Toast.LENGTH_SHORT).show()
                                             return@launch
                                         }
-                                        saveBitmapToPictures(context, bitmap, currentPositionMs)
+                                        withContext(Dispatchers.IO) {
+                                            saveBitmapToPictures(context, bitmap, currentPositionMs)
+                                        }
                                         Toast.makeText(context, "Saved frame to Pictures!", Toast.LENGTH_SHORT).show()
                                     } catch (e: Exception) {
                                         e.printStackTrace()
@@ -410,7 +434,7 @@ fun FrameExtractorApp() {
                             onClick = {
                                 player.pause()
                                 isPlaying = false
-                                stepFrame(player, videoDurationMs, msPerFrame, -1)
+                                stepFrame(player, currentPositionMs, videoDurationMs, msPerFrame, -1)
                             },
                             interactionSource = prevInteractionSource,
                             modifier = Modifier.size(48.dp)
@@ -448,7 +472,7 @@ fun FrameExtractorApp() {
                             onClick = {
                                 player.pause()
                                 isPlaying = false
-                                stepFrame(player, videoDurationMs, msPerFrame, 1)
+                                stepFrame(player, currentPositionMs, videoDurationMs, msPerFrame, 1)
                             },
                             interactionSource = nextInteractionSource,
                             modifier = Modifier.size(48.dp)
@@ -468,11 +492,11 @@ fun FrameExtractorApp() {
 }
 
 /** Seek the player one frame forward (+1) or backward (-1). */
-private fun stepFrame(player: ExoPlayer, durationMs: Long, msPerFrame: Long, direction: Int) {
+private fun stepFrame(player: ExoPlayer, currentPosMs: Long, durationMs: Long, msPerFrame: Long, direction: Int) {
     val newPos = if (direction > 0)
-        (player.currentPosition + msPerFrame).coerceAtMost(durationMs)
+        (currentPosMs + msPerFrame).coerceAtMost(durationMs)
     else
-        (player.currentPosition - msPerFrame).coerceAtLeast(0L)
+        (currentPosMs - msPerFrame).coerceAtLeast(0L)
     player.seekTo(newPos)
 }
 
