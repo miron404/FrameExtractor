@@ -35,7 +35,10 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
@@ -153,27 +156,43 @@ fun FrameExtractorApp() {
 
     LaunchedEffect(videoUri) {
         if (videoUri == null) return@LaunchedEffect
-        withContext(Dispatchers.IO) {
-            var currentlyDecodedMs = -1L
-            while (true) {
-                val targetMs = currentPositionMs
-                if (targetMs != currentlyDecodedMs) {
-                    val frame = retriever.getFrameAtTime(targetMs * 1000L, MediaMetadataRetriever.OPTION_CLOSEST)
-                    withContext(Dispatchers.Main) {
-                        currentBitmap = frame
+        var decodeJob: Job? = null
+        var lastDecodedMs = -1L
+
+        // Reactively observe position changes via snapshotFlow (no polling)
+        snapshotFlow { currentPositionMs }
+            .collect { targetMs ->
+                if (targetMs == lastDecodedMs) return@collect
+                lastDecodedMs = targetMs
+
+                // Cancel any in-flight decode — new position takes priority
+                decodeJob?.cancel()
+                decodeJob = launch(Dispatchers.IO) {
+                    if (!isActive) return@launch
+                    // OPTION_CLOSEST_SYNC is much faster; fall back to OPTION_CLOSEST
+                    // for paused/precise stepping so the user still gets an exact frame.
+                    val option = if (isPlaying) {
+                        MediaMetadataRetriever.OPTION_CLOSEST_SYNC
+                    } else {
+                        MediaMetadataRetriever.OPTION_CLOSEST
                     }
-                    currentlyDecodedMs = targetMs
+                    val frame = retriever.getFrameAtTime(targetMs * 1000L, option)
+                    if (!isActive) return@launch
+                    withContext(Dispatchers.Main) {
+                        if (frame != null) {
+                            currentBitmap = frame
+                        }
+                    }
                 }
-                delay(16)
             }
-        }
     }
 
     LaunchedEffect(isPlaying, playSpeedFps) {
         if (isPlaying) {
-            while (currentPositionMs < videoDurationMs) {
-                val delayMs = (1000f / playSpeedFps).toLong()
+            while (isActive && isPlaying && currentPositionMs < videoDurationMs) {
+                val delayMs = (1000f / playSpeedFps).toLong().coerceAtLeast(8L)
                 delay(delayMs)
+                if (!isPlaying) break
                 currentPositionMs = (currentPositionMs + msPerFrame).coerceAtMost(videoDurationMs)
                 if (currentPositionMs >= videoDurationMs) {
                     isPlaying = false
