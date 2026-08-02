@@ -215,6 +215,11 @@ fun FrameExtractorApp() {
         }
     }
 
+    // Ensure video keeps aspect ratio inside TextureView
+    LaunchedEffect(player) {
+        player.videoScalingMode = androidx.media3.common.C.VIDEO_SCALING_MODE_SCALE_TO_FIT
+    }
+
     // Long-press: previous frame
     val prevInteractionSource = remember { MutableInteractionSource() }
     val isPrevPressed by prevInteractionSource.collectIsPressedAsState()
@@ -223,7 +228,9 @@ fun FrameExtractorApp() {
         if (isPrevPressed && !isPlaying) {
             delay(400)
             while (isActive && isPrevPressed) {
-                stepFrame(player, currentPositionMs, videoDurationMs, msPerFrame, -1)
+                val pos = (currentPositionMs - msPerFrame).coerceAtLeast(0L)
+                currentPositionMs = pos
+                player.seekTo(pos)
                 delay((1000f / playSpeedFps).toLong())
             }
         }
@@ -237,7 +244,9 @@ fun FrameExtractorApp() {
         if (isNextPressed && !isPlaying) {
             delay(400)
             while (isActive && isNextPressed) {
-                stepFrame(player, currentPositionMs, videoDurationMs, msPerFrame, 1)
+                val pos = (currentPositionMs + msPerFrame).coerceAtMost(videoDurationMs)
+                currentPositionMs = pos
+                player.seekTo(pos)
                 delay((1000f / playSpeedFps).toLong())
             }
         }
@@ -434,7 +443,9 @@ fun FrameExtractorApp() {
                             onClick = {
                                 player.pause()
                                 isPlaying = false
-                                stepFrame(player, currentPositionMs, videoDurationMs, msPerFrame, -1)
+                                val pos = (currentPositionMs - msPerFrame).coerceAtLeast(0L)
+                                currentPositionMs = pos
+                                player.seekTo(pos)
                             },
                             interactionSource = prevInteractionSource,
                             modifier = Modifier.size(48.dp)
@@ -472,7 +483,9 @@ fun FrameExtractorApp() {
                             onClick = {
                                 player.pause()
                                 isPlaying = false
-                                stepFrame(player, currentPositionMs, videoDurationMs, msPerFrame, 1)
+                                val pos = (currentPositionMs + msPerFrame).coerceAtMost(videoDurationMs)
+                                currentPositionMs = pos
+                                player.seekTo(pos)
                             },
                             interactionSource = nextInteractionSource,
                             modifier = Modifier.size(48.dp)
@@ -489,15 +502,6 @@ fun FrameExtractorApp() {
             }
         }
     }
-}
-
-/** Seek the player one frame forward (+1) or backward (-1). */
-private fun stepFrame(player: ExoPlayer, currentPosMs: Long, durationMs: Long, msPerFrame: Long, direction: Int) {
-    val newPos = if (direction > 0)
-        (currentPosMs + msPerFrame).coerceAtMost(durationMs)
-    else
-        (currentPosMs - msPerFrame).coerceAtLeast(0L)
-    player.seekTo(newPos)
 }
 
 private fun saveBitmapToPictures(context: android.content.Context, bitmap: Bitmap, timestampMs: Long) {
