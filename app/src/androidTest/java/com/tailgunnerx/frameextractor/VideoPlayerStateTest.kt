@@ -1,5 +1,9 @@
 package com.tailgunnerx.frameextractor
 
+import android.graphics.ImageFormat
+import android.media.ImageReader
+import android.os.Handler
+import android.os.HandlerThread
 import android.os.SystemClock
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -30,6 +34,8 @@ class VideoPlayerStateTest {
     private val context = instrumentation.targetContext
 
     private lateinit var state: VideoPlayerState
+    private lateinit var frameSink: ImageReader
+    private lateinit var frameSinkThread: HandlerThread
 
     private fun <T> onMain(block: () -> T): T {
         var result: T? = null
@@ -62,7 +68,20 @@ class VideoPlayerStateTest {
 
     @Before
     fun setUp() {
+        // A real output surface, not because anything looks at it, but because without one ExoPlayer
+        // *skips* video buffers instead of rendering them - so nothing is ever put on a surface, and
+        // the frame metadata these tests read is never reported. An ImageReader is the headless
+        // equivalent of the TextureView the app uses; its frames have to be consumed or the codec
+        // stalls once the queue fills.
+        frameSinkThread = HandlerThread("frame-sink").apply { start() }
+        frameSink = ImageReader.newInstance(TestVideo.WIDTH, TestVideo.HEIGHT, ImageFormat.PRIVATE, 4)
+        frameSink.setOnImageAvailableListener(
+            { reader -> reader.acquireLatestImage()?.close() },
+            Handler(frameSinkThread.looper),
+        )
+
         state = onMain { VideoPlayerState(ExoPlayer.Builder(context.applicationContext).build()) }
+        onMain { state.player.setVideoSurface(frameSink.surface) }
         val uri = TestVideo.copyToCache()
         val error = runBlocking(Dispatchers.Main) { state.load(context, uri) }
         assertEquals(null, error)
@@ -73,6 +92,15 @@ class VideoPlayerStateTest {
     @After
     fun tearDown() {
         onMain { state.release() }
+        frameSink.close()
+        frameSinkThread.quitSafely()
+    }
+
+    @Test
+    fun theFirstFrameReachesTheSurface() {
+        // Everything below reads which frame is on the surface, so prove the surface gets frames at
+        // all: a failure here means the emulator is skipping video, not that the app is wrong.
+        waitUntil("the first frame to be rendered") { state.renderedFrameIndex != null }
     }
 
     @Test
