@@ -13,6 +13,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.platform.LocalContext
 import androidx.media3.common.C
 import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
@@ -56,6 +57,12 @@ class VideoPlayerState(val player: ExoPlayer) {
     var displayAspectRatio by mutableFloatStateOf(0f)
         private set
 
+    /** Set when the player gives up on the clip. Nothing else on screen can report this: with the
+     *  player being the only thing that decodes, a failed playback would otherwise just sit there
+     *  showing the "loading" placeholder forever. */
+    var playbackError by mutableStateOf<String?>(null)
+        private set
+
     /** The frame the user is looking at. Everything else about position is derived from this. */
     var frameIndex by mutableLongStateOf(0L)
         private set
@@ -83,6 +90,11 @@ class VideoPlayerState(val player: ExoPlayer) {
             }
         }
 
+        override fun onPlayerError(error: PlaybackException) {
+            isPlaying = false
+            playbackError = error.errorCodeName
+        }
+
         override fun onVideoSizeChanged(videoSize: VideoSize) {
             displayAspectRatio = Timeline.displayAspectRatio(
                 videoSize.width,
@@ -108,6 +120,7 @@ class VideoPlayerState(val player: ExoPlayer) {
     suspend fun load(context: Context, uri: Uri): Throwable? {
         isPlaying = false
         isLoading = true
+        playbackError = null
         frameIndex = 0L
         displayAspectRatio = 0f
         info = null
@@ -134,6 +147,7 @@ class VideoPlayerState(val player: ExoPlayer) {
 
     fun unload() {
         isPlaying = false
+        playbackError = null
         info = null
         frameIndex = 0L
         displayAspectRatio = 0f

@@ -49,6 +49,11 @@ class VideoPlayerStateTest {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         while (SystemClock.uptimeMillis() < deadline) {
             if (onMain(condition)) return
+            onMain { state.playbackError }?.let { error ->
+                // An emulator without a working H.264 decoder fails every one of these tests; say so
+                // instead of leaving twenty identical timeouts to interpret.
+                throw AssertionError("player failed while waiting for $message: $error")
+            }
             SystemClock.sleep(50L)
         }
         throw AssertionError("timed out waiting for: $message")
@@ -61,6 +66,7 @@ class VideoPlayerStateTest {
         val error = runBlocking(Dispatchers.Main) { state.load(context, uri) }
         assertEquals(null, error)
         waitUntil("player to become ready") { state.player.playbackState == ExoPlayer.STATE_READY }
+        assertEquals(null, state.playbackError)
     }
 
     @After

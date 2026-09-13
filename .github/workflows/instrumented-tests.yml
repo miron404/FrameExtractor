@@ -1,8 +1,8 @@
 name: Instrumented tests
 
-# Runs the decoding/playback tests on a real Android system image. This is the only place where the
-# frame pipeline can actually be exercised: seeking accuracy, preview scaling and player state all
-# depend on the platform codecs.
+# Runs the decoding/playback tests on a real Android system image. This is the only place the frame
+# pipeline can actually be exercised end to end: seek accuracy and player state both depend on the
+# platform codecs, and the app now renders every frame the user sees through the player.
 
 on:
   push:
@@ -22,6 +22,11 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+
+      # Same supply-chain guard the build workflow applies: gradle-wrapper.jar is checked against
+      # the checksum Gradle publishes for the version in gradle/wrapper/gradle-wrapper.properties.
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
 
       - name: Set up JDK 17
         uses: actions/setup-java@v4
@@ -47,13 +52,21 @@ jobs:
           profile: pixel_5
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
-          # The tests print their measurements to stdout, which Android forwards to logcat with
-          # the System.out tag; dump it so the numbers end up in the build log.
+          # On failure, dump the tags that explain *why*. Every test here depends on the emulator
+          # actually having a working H.264 decoder, and when it does not the useful message is in
+          # the player's log rather than in the assertion.
           script: |
             set +e
             ./gradlew --stacktrace connectedDebugAndroidTest
             EXIT=$?
-            adb logcat -d -s System.out:I | tail -80
+            if [ "$EXIT" -ne 0 ]; then
+              echo "::group::logcat (player and codec)"
+              adb logcat -d -s \
+                ExoPlayerImplInternal:* MediaCodecVideoRenderer:* MediaCodecRenderer:* \
+                MediaCodec:* MediaCodecList:* ACodec:* OMXClient:* \
+                TestRunner:I System.out:I AndroidRuntime:E | tail -300
+              echo "::endgroup::"
+            fi
             exit $EXIT
 
       - name: Upload instrumented test report

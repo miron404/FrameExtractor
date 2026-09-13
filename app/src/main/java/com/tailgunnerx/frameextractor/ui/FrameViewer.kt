@@ -100,7 +100,10 @@ fun FrameViewer(
             },
         )
 
-        if (state.info == null) {
+        val error = state.playbackError
+        if (error != null) {
+            Text(text = "Cannot play this video ($error)", color = Color.Gray)
+        } else if (state.info == null) {
             Text(text = placeholder, color = Color.Gray)
         }
 
