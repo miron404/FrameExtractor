@@ -59,6 +59,9 @@ dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)
 
+    // Playback goes through the platform video codec instead of MediaMetadataRetriever seeks.
+    implementation(libs.androidx.media3.exoplayer)
+
     testImplementation(libs.junit)
 
     androidTestImplementation(platform(libs.androidx.compose.bom))
