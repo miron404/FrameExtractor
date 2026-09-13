@@ -32,7 +32,7 @@ Why frame stepping and video playback used to feel slow, and what changed.
 | Area | Before | After |
 | --- | --- | --- |
 | Still frames | `while(true) + delay(16)` polling | `snapshotFlow { SeekRequest(...) }.distinctUntilChanged().collectLatest { }` - decode only on real change, newest request wins |
-| Decode size | source resolution | `getScaledFrameAtTime` into the viewer's pixel box (`Timeline.previewDimension`), full resolution only when saving |
+| Decode size | source resolution | into the viewer's pixel box (`Timeline.previewDimension`), at source resolution only when saving. A clip that already fits the view still goes through the exact `getFrameAtTime` path; the scaled accessor is used only when the frame is genuinely larger than the box |
 | Playback | re-seek per frame | `ExoPlayer` (media3) on a `SurfaceView`, hardware decoded, audio disabled, speed = `displayFps / videoFps` |
 | Position updates | one recomposition per decoded frame | player polled every 80 ms while playing |
 | Repeated frames | always re-decoded | `FrameCache` (48 MB LRU) keyed by frame index + preview size |
@@ -68,8 +68,13 @@ The test clip can be regenerated with `python3 tools/generate_test_video.py` (ne
 
 * Zoom/pan applies to the paused still frame only. It is reset when playback starts, because the
   player renders through a `SurfaceView`, which cannot be transformed as cheaply as a texture.
-* Frames are still decoded through `MediaMetadataRetriever`, which is exact (`OPTION_CLOSEST`) but
-  not incremental. A `MediaCodec` + `ImageReader` pipeline that decodes forward frame by frame could
-  go faster for single-step scrubbing; it is a much larger change and was left out.
+* Frames are still decoded through `MediaMetadataRetriever`, which seeks exactly
+  (`OPTION_CLOSEST`) but is not incremental. A `MediaCodec` + `ImageReader` pipeline that decodes
+  forward frame by frame could go faster for single-step scrubbing; it is a much larger change and
+  was left out.
+* For a source larger than the view, the preview uses the scaled accessor, which some platform
+  extractors round onto the neighbouring frame (up to ~33 ms at 30 fps). Saving always re-decodes
+  with the exact accessor, so extracted files are unaffected;
+  `scaledPreviewStaysWithinOneFrameOfTheExactFrame` bounds the drift.
 * Playback speed below ~0.1x is dominated by the player's frame scheduler rather than by decode
   throughput.

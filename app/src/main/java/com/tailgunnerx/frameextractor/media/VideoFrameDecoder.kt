@@ -82,9 +82,12 @@ class VideoFrameDecoder private constructor(
 
     private fun decodeScaled(timeMs: Long, width: Int, height: Int): Bitmap? {
         val timeUs = timeMs * 1000L
-        // getScaledFrameAtTime() decodes and scales in one pass; it needs API 27. Below that we
-        // fall back to a full size frame and shrink it ourselves.
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
+        // Only ask for a scaled frame when the frame really is bigger than the box. The scaled
+        // accessor (API 27+) is what makes a 4K source cheap to scrub, but it is also the less
+        // precise of the two paths - so a clip that already fits the view is decoded with the
+        // plain, exactly seeking accessor.
+        val needsDownscale = info.hasSize && (width < info.displayWidth || height < info.displayHeight)
+        if (needsDownscale && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
             val scaled = runCatching {
                 retriever.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST, width, height)
             }.getOrNull()
@@ -93,7 +96,7 @@ class VideoFrameDecoder private constructor(
         val full = runCatching {
             retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
         }.getOrNull() ?: return null
-        if (full.width <= width && full.height <= height) return full
+        if (!needsDownscale || (full.width <= width && full.height <= height)) return full
         return runCatching {
             Bitmap.createScaledBitmap(full, width, height, true)
         }.getOrNull() ?: full
