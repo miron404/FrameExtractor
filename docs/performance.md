@@ -35,7 +35,8 @@ playing, and the frame *index* is the only stored position - milliseconds are al
 
 | Area | Before | After |
 | --- | --- | --- |
-| Paused frame | separate `MediaMetadataRetriever` decode into a `Bitmap` | already on the player's surface; pausing decodes nothing |
+| Paused frame | separate `MediaMetadataRetriever` decode into a `Bitmap` | already on the player's surface; pausing neither decodes nor seeks |
+| Which frame is on screen | inferred from `currentPosition`, the media clock | reported by the renderer via `setVideoFrameMetadataListener` |
 | Stepping | `getFrameAtTime(OPTION_CLOSEST)`, a full GOP per step | `seekTo` on a warm, already-configured decoder |
 | Seek accuracy | `CLOSEST_SYNC` (nearest keyframe) | `SeekParameters.EXACT`, aimed at the middle of the target frame |
 | Position | `positionMs`, stepped by a truncated `msPerFrame` | `frameIndex`, with `Timeline.frameMidpointMs` / `frameStartMs` derived from the rational frame rate |
@@ -60,8 +61,9 @@ bitmap is decoded for display any more.
   container**, rather than computing timestamps locally the way the previous version of this test
   did - which is why that test could not see the app drifting a frame every thirty.
 * `VideoPlayerStateTest` (instrumented) - the interactive path. Starts playback from frame 45, which
-  the test clip places deep inside a GOP, and asserts the position never moves backwards; asserts a
-  pause keeps the frame it stopped on and that nothing re-seeks afterwards.
+  the test clip places deep inside a GOP, and asserts the position never moves backwards; asserts
+  that seeking to a frame puts *that* frame on the surface; asserts that after a pause the reported
+  frame is the one on screen and that nothing further is rendered.
 * `FrameExtractorScreenTest` (instrumented) - drives the real screen end to end.
 
 ```
@@ -83,6 +85,22 @@ on a device**, and a CI emulator is the wrong place to try. If stepping still fe
 footage, the thing to look at first is media3's scrubbing mode (`setScrubbingModeEnabled`, added in
 media3 1.6.0), which keeps the decoder hot across a run of seeks; this project is pinned to 1.4.1,
 and moving up is likely to require raising `compileSdk`.
+
+## Which frame is on screen
+
+`currentPosition` is the media clock, not a statement about the surface: when playback stops it can
+already sit past the last rendered frame's timestamp. Reading it on pause therefore named the *next*
+frame, and correcting the player onto that frame dragged the picture forward by one and flashed the
+buffering spinner while the codec flushed - a pause that visibly stepped and stuttered.
+
+`ExoPlayer.setVideoFrameMetadataListener` reports the presentation time of each frame as it is
+rendered, so the app can read which frame is on the surface instead of inferring it. Pausing now only
+re-reads that value: no correcting seek, and nothing reaches the surface after the player stops. The
+clock is still the fallback, used when the two disagree by more than a second, which would mean a
+container whose frame timestamps are offset from the period.
+
+The spinner is also on a delay now. Every seek buffers briefly, so showing it the moment buffering
+starts made each frame step flash.
 
 ## Known trade-offs
 

@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -28,9 +29,13 @@ import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import kotlinx.coroutines.delay
 
 private const val MIN_ZOOM = 1f
 private const val MAX_ZOOM = 5f
+
+/** How long the player must be stalled before it is worth telling the user about. */
+private const val BUFFERING_SPINNER_DELAY_MS = 400L
 
 /**
  * Shows whatever the player's decoder has rendered - which is every frame the user ever sees, both
@@ -107,7 +112,18 @@ fun FrameViewer(
             Text(text = placeholder, color = Color.Gray)
         }
 
-        if (state.isBuffering) {
+        // Any seek buffers for a moment, so showing this the instant buffering starts made every
+        // frame step and every pause flash a spinner. Only a stall long enough to actually notice
+        // is worth reporting.
+        var stalled by remember { mutableStateOf(false) }
+        LaunchedEffect(state.isBuffering) {
+            stalled = false
+            if (state.isBuffering) {
+                delay(BUFFERING_SPINNER_DELAY_MS)
+                stalled = true
+            }
+        }
+        if (stalled) {
             CircularProgressIndicator(color = Color.White, modifier = Modifier.size(48.dp))
         }
     }

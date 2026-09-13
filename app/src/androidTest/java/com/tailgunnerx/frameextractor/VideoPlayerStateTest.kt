@@ -127,7 +127,7 @@ class VideoPlayerStateTest {
     }
 
     @Test
-    fun pausingSettlesOnTheFrameThePlayerActuallyStoppedOn() {
+    fun pausingReportsTheFrameOnScreenAndRendersNothingFurther() {
         onMain { state.seekToFrame(20L) }
         runBlocking { state.applyPlaybackFps(30f) }
         onMain { state.play() }
@@ -136,24 +136,31 @@ class VideoPlayerStateTest {
             state.frameIndex > 20L
         }
 
-        val atPause = onMain { state.pause(); state.frameIndex }
-        // pause() returns before the player stops - it still renders the frame it had queued - so
-        // the position is refined once it has really come to rest.
+        onMain { state.pause() }
+        // pause() returns before the player stops; give it room to come to rest.
         SystemClock.sleep(1_000L)
+
         val settled = onMain { state.frameIndex }
-        assertTrue("settled backwards: paused at $atPause, settled on $settled", settled >= atPause)
-        assertTrue("settled $settled, more than a frame past the pause at $atPause", settled - atPause <= 1L)
+        val onScreen = onMain { state.renderedFrameIndex }
+        assertEquals("the reported frame is not the frame on the surface", onScreen, settled)
 
-        // The frame it reports has to be the frame the player is sitting on, or saving extracts a
-        // different frame from the one on screen.
-        val fromPlayer = onMain {
-            Timeline.frameIndexAt(state.player.currentPosition.coerceAtLeast(0L), state.fps)
+        // The regression this guards: correcting the player onto the clock's idea of the position
+        // re-rendered a *different* frame, so pausing flashed and stepped one frame forward. Once
+        // paused, nothing may reach the surface at all.
+        SystemClock.sleep(1_000L)
+        assertEquals("a frame was rendered after the pause settled", onScreen, onMain { state.renderedFrameIndex })
+        assertEquals("the position moved after the pause settled", settled, onMain { state.frameIndex })
+    }
+
+    @Test
+    fun seekingToAFrameRendersThatExactFrame() {
+        // The decoder test covers the extraction path; this is the same question for the path the
+        // user actually looks at - an exact seek aimed at the middle of the frame's interval.
+        for (index in listOf(0L, 1L, 29L, 30L, 31L, 45L, 59L)) {
+            onMain { state.seekToFrame(index) }
+            waitUntil("frame $index to reach the surface") { state.renderedFrameIndex == index }
+            assertEquals(index, onMain { state.frameIndex })
         }
-        assertEquals(settled, fromPlayer)
-
-        // And nothing may move it afterwards.
-        SystemClock.sleep(500L)
-        assertEquals(settled, onMain { state.frameIndex })
     }
 
     @Test

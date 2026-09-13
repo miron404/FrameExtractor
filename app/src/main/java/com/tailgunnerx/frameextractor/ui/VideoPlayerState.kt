@@ -19,6 +19,7 @@ import androidx.media3.common.Player
 import androidx.media3.common.VideoSize
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.SeekParameters
+import androidx.media3.exoplayer.video.VideoFrameMetadataListener
 import com.tailgunnerx.frameextractor.media.VideoFrameDecoder
 import com.tailgunnerx.frameextractor.media.VideoInfo
 import com.tailgunnerx.frameextractor.util.Timeline
@@ -81,6 +82,24 @@ class VideoPlayerState(val player: ExoPlayer) {
     private var settleOnStop = false
 
     /**
+     * Presentation time of the frame the renderer last put on the surface, i.e. the frame actually
+     * being looked at.
+     *
+     * `currentPosition` is the media clock, which can already be past the last rendered frame's
+     * timestamp - reading it on pause reported the *next* frame, and correcting the player onto that
+     * frame then dragged the picture forward by one. Asking which frame was rendered removes the
+     * guess, and with it the correcting seek and the buffering flash it caused.
+     *
+     * Written from the playback thread.
+     */
+    @Volatile
+    private var lastRenderedUs: Long = C.TIME_UNSET
+
+    private val frameMetadataListener = VideoFrameMetadataListener { presentationTimeUs, _, _, _ ->
+        lastRenderedUs = presentationTimeUs
+    }
+
+    /**
      * The player is confined to the thread it was built on and throws if touched from anywhere else.
      * Click handlers are already on it; effects are not - a `LaunchedEffect` inherits whatever
      * dispatcher the composition runs on, which under `createComposeRule` is a worker thread. So
@@ -111,8 +130,9 @@ class VideoPlayerState(val player: ExoPlayer) {
             // settled on, then snap exactly onto it.
             if (playing || !settleOnStop || player.playWhenReady || info == null) return
             settleOnStop = false
+            // Only re-read which frame is on the surface. Deliberately no seek: correcting the
+            // player here is what made pausing flash and step a frame forward.
             syncFrameFromPlayer()
-            player.seekTo(Timeline.frameMidpointMs(frameIndex, fps))
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -139,6 +159,7 @@ class VideoPlayerState(val player: ExoPlayer) {
         // ask for, to make Play feel snappy) silently drops you on the nearest keyframe, which can be
         // seconds away from the frame being looked at.
         player.setSeekParameters(SeekParameters.EXACT)
+        player.setVideoFrameMetadataListener(frameMetadataListener)
         player.addListener(listener)
     }
 
@@ -148,6 +169,7 @@ class VideoPlayerState(val player: ExoPlayer) {
             isLoading = true
             playbackError = null
             settleOnStop = false
+            lastRenderedUs = C.TIME_UNSET
             frameIndex = 0L
             displayAspectRatio = 0f
             info = null
@@ -178,6 +200,7 @@ class VideoPlayerState(val player: ExoPlayer) {
     fun unload() {
         isPlaying = false
         settleOnStop = false
+        lastRenderedUs = C.TIME_UNSET
         playbackError = null
         info = null
         frameIndex = 0L
@@ -227,12 +250,29 @@ class VideoPlayerState(val player: ExoPlayer) {
 
     fun togglePlay() = if (isPlaying) pause() else play()
 
-    /** Called by the position poll while playing; never seeks. */
+    /** Called by the position poll while playing, and once more when a pause settles. Never seeks. */
     fun syncFrameFromPlayer() {
         if (info == null) return
-        frameIndex = Timeline.frameIndexAt(player.currentPosition.coerceAtLeast(0L), fps)
+        frameIndex = renderedFrameIndex ?: Timeline
+            .frameIndexAt(player.currentPosition.coerceAtLeast(0L), fps)
             .coerceIn(0L, lastFrameIndex)
     }
+
+    /**
+     * The frame on the surface, or null before anything has been rendered.
+     *
+     * Falls back to the clock if the two disagree by more than a second: a container whose frame
+     * timestamps are offset from the period would otherwise put the readout somewhere else entirely,
+     * and being a frame out beats being a minute out.
+     */
+    val renderedFrameIndex: Long?
+        get() {
+            val renderedUs = lastRenderedUs
+            if (renderedUs == C.TIME_UNSET || info == null) return null
+            val renderedMs = renderedUs / 1000L
+            if (abs(renderedMs - player.currentPosition) > OFFSET_SANITY_MS) return null
+            return Timeline.frameIndexAt(renderedMs.coerceAtLeast(0L), fps).coerceIn(0L, lastFrameIndex)
+        }
 
     /** Driven by an effect, so it cannot assume it is already on the player's thread. */
     suspend fun applyPlaybackFps(displayFps: Float) = withContext(playerThread) {
@@ -246,6 +286,7 @@ class VideoPlayerState(val player: ExoPlayer) {
         if (released) return
         released = true
         player.removeListener(listener)
+        player.clearVideoFrameMetadataListener(frameMetadataListener)
         closeDecoder()
         player.release()
     }
@@ -260,6 +301,9 @@ class VideoPlayerState(val player: ExoPlayer) {
         decoder = null
     }
 }
+
+/** How far the rendered frame's timestamp may sit from the clock before it is not believed. */
+private const val OFFSET_SANITY_MS = 1_000L
 
 @Composable
 fun rememberVideoPlayerState(): VideoPlayerState {
