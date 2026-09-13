@@ -254,9 +254,16 @@ class VideoPlayerState(val player: ExoPlayer) {
     /** Called by the position poll while playing, and once more when a pause settles. Never seeks. */
     fun syncFrameFromPlayer() {
         if (info == null) return
-        frameIndex = renderedFrameIndex ?: Timeline
-            .frameIndexAt(player.currentPosition.coerceAtLeast(0L), fps)
+        renderedFrameIndex?.let { frameIndex = it; return }
+
+        // Nothing has reached the surface since the seek that put us here. The clock is all that is
+        // left, and on its own it is not trustworthy: a seek aims a quarter frame *below* the target
+        // frame's timestamp, so reading the clock there names the frame before it and the counter
+        // would tick backwards the moment playback started. It exists only to keep the counter
+        // moving during playback, where the clock only ever runs forward - so let it do only that.
+        val fromClock = Timeline.frameIndexAt(player.currentPosition.coerceAtLeast(0L), fps)
             .coerceIn(0L, lastFrameIndex)
+        if (fromClock > frameIndex) frameIndex = fromClock
     }
 
     /**

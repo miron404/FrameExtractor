@@ -53,8 +53,8 @@ class VideoPlayerStateTest {
     }
 
     private companion object {
-        /** Long enough for a seek's frame to be handed to the surface once the player is ready. */
-        const val SEEK_RENDER_SETTLE_MS = 600L
+        /** An exact seek deep into a GOP decodes every frame from its keyframe; allow for that. */
+        const val SEEK_RENDER_TIMEOUT_MS = 15_000L
     }
 
     private fun waitUntil(message: String, timeoutMs: Long = 15_000L, condition: () -> Boolean) {
@@ -194,15 +194,24 @@ class VideoPlayerStateTest {
         // about what happened, so this settles and then reports what actually reached the surface.
         val wrong = mutableListOf<String>()
         for (index in listOf(0L, 1L, 29L, 30L, 31L, 45L, 59L)) {
+            val before = onMain { state.lastRenderedUs }
             onMain { state.seekToFrame(index) }
-            waitUntil("the seek to frame $index to finish") {
-                state.player.playbackState == ExoPlayer.STATE_READY
+
+            // Waiting on a fixed delay is not enough: an exact seek decodes forward from the
+            // preceding keyframe, so the further into a GOP the target sits the longer it takes -
+            // the last frame of the clip is 29 frames past its keyframe. Wait for the surface to
+            // change instead, and only then ask what landed on it.
+            var rendered: Long? = null
+            val deadline = SystemClock.uptimeMillis() + SEEK_RENDER_TIMEOUT_MS
+            while (SystemClock.uptimeMillis() < deadline) {
+                rendered = onMain { state.renderedFrameIndex }
+                if (rendered == index || onMain { state.lastRenderedUs } != before) break
+                SystemClock.sleep(50L)
             }
-            SystemClock.sleep(SEEK_RENDER_SETTLE_MS)
-            val rendered = onMain { state.renderedFrameIndex }
+
             if (rendered != index) {
-                val pts = onMain { state.lastRenderedUs }
-                wrong += "asked $index, rendered $rendered (pts=${pts}us, fps=${onMain { state.fps }})"
+                wrong += "asked $index, rendered $rendered " +
+                    "(pts=${onMain { state.lastRenderedUs }}us, fps=${onMain { state.fps }})"
             }
             assertEquals("the counter disagrees with the seek", index, onMain { state.frameIndex })
         }

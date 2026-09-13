@@ -115,6 +115,11 @@ them cost a round of wrong guesses:
 is at or before it, after the previous frame's, and nearer to it than to either neighbour, with room
 for the frame rate being an estimate derived from the container's frame count and duration.
 
+Aiming below the frame has one consequence worth knowing: at rest on a seek target the media clock
+names the *previous* frame. So the clock is no longer allowed to set the counter on its own - it may
+only carry it forward during playback, which is the one thing it is good for. What frame is on screen
+is answered by the renderer.
+
 Reading that value back is its own trap. "Which frame contains this instant" and "which frame has
 this timestamp" are different questions: the first rounds down, but a container stores a frame's
 timestamp truncated onto its time base, so it sits just below the ideal boundary - 966666us for a
