@@ -52,22 +52,19 @@ jobs:
           profile: pixel_5
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -no-snapshot -noaudio -no-boot-anim -camera-back none
-          # On failure, dump the tags that explain *why*. Every test here depends on the emulator
-          # actually having a working H.264 decoder, and when it does not the useful message is in
-          # the player's log rather than in the assertion.
-          script: |
-            set +e
-            ./gradlew --stacktrace connectedDebugAndroidTest
-            EXIT=$?
-            if [ "$EXIT" -ne 0 ]; then
-              echo "::group::logcat (player and codec)"
-              adb logcat -d -s \
-                ExoPlayerImplInternal:* MediaCodecVideoRenderer:* MediaCodecRenderer:* \
-                MediaCodec:* MediaCodecList:* ACodec:* OMXClient:* \
-                TestRunner:I System.out:I AndroidRuntime:E | tail -300
-              echo "::endgroup::"
-            fi
-            exit $EXIT
+          # android-emulator-runner runs this script one line per `sh -c`, so nothing carries
+          # between lines - a `$?` captured on its own line is always 0, and a multi-line `if` is a
+          # syntax error. It has to be a single command.
+          #
+          # On failure, dump the tags that explain why: these tests all need the emulator to have a
+          # working H.264 decoder, and when it does not, the reason is in the player's log rather
+          # than in the assertion.
+          script: >-
+            ./gradlew --stacktrace connectedDebugAndroidTest ||
+            { adb logcat -d
+            'ExoPlayerImplInternal:V' 'MediaCodecVideoRenderer:V' 'MediaCodecRenderer:V'
+            'MediaCodec:V' 'MediaCodecList:V' 'ACodec:V'
+            'TestRunner:I' 'System.out:I' 'AndroidRuntime:E' '*:S' | tail -300; exit 1; }
 
       - name: Upload instrumented test report
         if: always()
