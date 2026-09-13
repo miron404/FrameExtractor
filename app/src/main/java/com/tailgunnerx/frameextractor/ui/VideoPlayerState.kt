@@ -93,7 +93,8 @@ class VideoPlayerState(val player: ExoPlayer) {
      * Written from the playback thread.
      */
     @Volatile
-    private var lastRenderedUs: Long = C.TIME_UNSET
+    var lastRenderedUs: Long = C.TIME_UNSET
+        private set
 
     private val frameMetadataListener = VideoFrameMetadataListener { presentationTimeUs, _, _, _ ->
         lastRenderedUs = presentationTimeUs
@@ -269,9 +270,8 @@ class VideoPlayerState(val player: ExoPlayer) {
         get() {
             val renderedUs = lastRenderedUs
             if (renderedUs == C.TIME_UNSET || info == null) return null
-            val renderedMs = renderedUs / 1000L
-            if (abs(renderedMs - player.currentPosition) > OFFSET_SANITY_MS) return null
-            return Timeline.frameIndexAt(renderedMs.coerceAtLeast(0L), fps).coerceIn(0L, lastFrameIndex)
+            if (abs(renderedUs / 1000L - player.currentPosition) > OFFSET_SANITY_MS) return null
+            return Timeline.frameIndexOfTimestampUs(renderedUs, fps).coerceIn(0L, lastFrameIndex)
         }
 
     /** Driven by an effect, so it cannot assume it is already on the player's thread. */

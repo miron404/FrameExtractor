@@ -106,6 +106,23 @@ class TimelineTest {
     }
 
     @Test
+    fun aFrameTimestampMapsBackOntoItsOwnFrame() {
+        // Containers store a frame's timestamp truncated onto their time base, so it sits just below
+        // the ideal boundary - 966666us for a frame that ideally starts at 966666.67us. Rounding
+        // that down names the previous frame, which is what made a seek to frame 29 report 28.
+        for (fps in listOf(23.976f, 24f, 25f, 29.97f, 30f, 50f, 59.94f, 60f, 120f)) {
+            for (index in 0L..300L) {
+                val storedTimestampUs = (index * 1_000_000.0 / fps).toLong()
+                assertEquals(
+                    "fps=$fps index=$index pts=${storedTimestampUs}us",
+                    index,
+                    Timeline.frameIndexOfTimestampUs(storedTimestampUs, fps),
+                )
+            }
+        }
+    }
+
+    @Test
     fun playbackSpeed_mapsDisplayFpsOntoSourceFps() {
         // 5 fps preview of 30 fps footage is a 6x slow motion.
         assertEquals(5f / 30f, Timeline.playbackSpeed(5f, 30f), 1e-6f)

@@ -99,6 +99,12 @@ re-reads that value: no correcting seek, and nothing reaches the surface after t
 clock is still the fallback, used when the two disagree by more than a second, which would mean a
 container whose frame timestamps are offset from the period.
 
+Reading that value back is its own trap. "Which frame contains this instant" and "which frame has
+this timestamp" are different questions: the first rounds down, but a container stores a frame's
+timestamp truncated onto its time base, so it sits just below the ideal boundary - 966666us for a
+frame that ideally starts at 966666.67us - and rounding *that* down names the previous frame.
+`Timeline.frameIndexAt` answers the first, `frameIndexOfTimestampUs` the second.
+
 The spinner is also on a delay now. Every seek buffers briefly, so showing it the moment buffering
 starts made each frame step flash.
 

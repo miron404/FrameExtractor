@@ -29,11 +29,33 @@ object Timeline {
     fun sanitizeFps(fps: Float?): Float =
         if (fps == null || !fps.isFinite() || fps <= 0f) DEFAULT_FPS else fps.coerceIn(MIN_FPS, MAX_FPS)
 
-    /** Index of the frame on screen at [positionMs]. */
+    /**
+     * Index of the frame whose interval contains [positionMs].
+     *
+     * For an arbitrary instant - the media clock, a scrub target. For a frame's *own* timestamp use
+     * [frameIndexOfTimestampUs]; rounding down is wrong there.
+     */
     fun frameIndexAt(positionMs: Long, fps: Float): Long {
         if (positionMs <= 0L) return 0L
         val rate = sanitizeFps(fps).toDouble()
         return floor(positionMs * rate / 1000.0).toLong().coerceAtLeast(0L)
+    }
+
+    /**
+     * Index of the frame a *frame timestamp* belongs to, as reported by the renderer in microseconds.
+     *
+     * Not the same question as [frameIndexAt], and not answered the same way. That one is given an
+     * arbitrary instant and asks which frame's interval contains it, so it rounds down. This one is
+     * given a frame's own presentation timestamp, which a container stores truncated onto its time
+     * base and so sits a hair *below* the ideal boundary - 966666us for a frame that ideally starts
+     * at 966666.67us. Rounding down there lands one frame early; rounding to nearest is both correct
+     * and tolerant of the timebase, since a stored timestamp is off by at most half a tick while a
+     * frame lasts thousands of them.
+     */
+    fun frameIndexOfTimestampUs(presentationTimeUs: Long, fps: Float): Long {
+        if (presentationTimeUs <= 0L) return 0L
+        val rate = sanitizeFps(fps).toDouble()
+        return (presentationTimeUs * rate / 1_000_000.0).roundToLong().coerceAtLeast(0L)
     }
 
     /**

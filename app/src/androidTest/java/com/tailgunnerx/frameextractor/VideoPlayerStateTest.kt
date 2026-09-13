@@ -52,6 +52,11 @@ class VideoPlayerStateTest {
         return result as T
     }
 
+    private companion object {
+        /** Long enough for a seek's frame to be handed to the surface once the player is ready. */
+        const val SEEK_RENDER_SETTLE_MS = 600L
+    }
+
     private fun waitUntil(message: String, timeoutMs: Long = 15_000L, condition: () -> Boolean) {
         val deadline = SystemClock.uptimeMillis() + timeoutMs
         while (SystemClock.uptimeMillis() < deadline) {
@@ -184,11 +189,24 @@ class VideoPlayerStateTest {
     fun seekingToAFrameRendersThatExactFrame() {
         // The decoder test covers the extraction path; this is the same question for the path the
         // user actually looks at - an exact seek aimed at the middle of the frame's interval.
+        //
+        // Waiting for the right answer would only ever time out when it is wrong, saying nothing
+        // about what happened, so this settles and then reports what actually reached the surface.
+        val wrong = mutableListOf<String>()
         for (index in listOf(0L, 1L, 29L, 30L, 31L, 45L, 59L)) {
             onMain { state.seekToFrame(index) }
-            waitUntil("frame $index to reach the surface") { state.renderedFrameIndex == index }
-            assertEquals(index, onMain { state.frameIndex })
+            waitUntil("the seek to frame $index to finish") {
+                state.player.playbackState == ExoPlayer.STATE_READY
+            }
+            SystemClock.sleep(SEEK_RENDER_SETTLE_MS)
+            val rendered = onMain { state.renderedFrameIndex }
+            if (rendered != index) {
+                val pts = onMain { state.lastRenderedUs }
+                wrong += "asked $index, rendered $rendered (pts=${pts}us, fps=${onMain { state.fps }})"
+            }
+            assertEquals("the counter disagrees with the seek", index, onMain { state.frameIndex })
         }
+        assertTrue("seeks landed on the wrong frame: $wrong", wrong.isEmpty())
     }
 
     @Test
