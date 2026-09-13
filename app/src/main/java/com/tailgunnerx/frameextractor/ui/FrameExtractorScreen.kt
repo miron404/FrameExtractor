@@ -115,9 +115,8 @@ fun FrameExtractorScreen(initialVideoUri: Uri? = null) {
             return@save
         }
         state.pause()
-        // The frame's own timestamp, not the middle of its interval: the retriever picks the frame
-        // with the nearest timestamp, and the midpoint ties with the next frame's. See Timeline.
-        val timeMs = Timeline.frameStartMs(state.frameIndex, state.fps)
+        // The same target the player was seeked to, so the extracted file is the frame on screen.
+        val timeMs = Timeline.seekTargetMs(state.frameIndex, state.fps)
         isExtracting = true
         scope.launch {
             try {

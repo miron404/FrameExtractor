@@ -58,7 +58,7 @@ class VideoFrameDecoderTest {
     /**
      * The end-to-end check that "frame N" means the same thing to the app as it does to the file.
      *
-     * Deliberately goes through [Timeline.frameStartMs] and the fps the app read from the
+     * Deliberately goes through [Timeline.seekTargetMs] and the fps the app read from the
      * container, rather than computing a timestamp locally: the previous version of this test did
      * its own arithmetic in doubles and so could not see that the app itself was stepping by a
      * truncated integer number of milliseconds and drifting a frame every thirty.
@@ -69,7 +69,7 @@ class VideoFrameDecoderTest {
         val mismatches = mutableListOf<Pair<Long, Int>>()
         try {
             for (index in 0L until decoder.info.totalFrames) {
-                val timeMs = Timeline.frameStartMs(index, decoder.info.fps)
+                val timeMs = Timeline.seekTargetMs(index, decoder.info.fps)
                 val frame = decoder.decodeFrame(timeMs)
                 assertNotNull("no frame decoded for index $index (${timeMs}ms)", frame)
                 val decoded = TestVideo.barcodeIndexOf(frame!!)
@@ -90,7 +90,7 @@ class VideoFrameDecoderTest {
         val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
         try {
             val last = decoder.info.lastFrameIndex
-            val frame = decoder.decodeFrame(Timeline.frameStartMs(last, decoder.info.fps))
+            val frame = decoder.decodeFrame(Timeline.seekTargetMs(last, decoder.info.fps))
             assertNotNull(frame)
             assertEquals(last, TestVideo.barcodeIndexOf(frame!!).toLong())
         } finally {
@@ -102,7 +102,7 @@ class VideoFrameDecoderTest {
     fun repeatedSeeksAreDeterministic() = runBlocking {
         val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
         try {
-            val time = Timeline.frameStartMs(17L, decoder.info.fps)
+            val time = Timeline.seekTargetMs(17L, decoder.info.fps)
             val first = decoder.decodeFrame(time)
             val second = decoder.decodeFrame(time)
             assertNotNull(first)

@@ -38,8 +38,8 @@ playing, and the frame *index* is the only stored position - milliseconds are al
 | Paused frame | separate `MediaMetadataRetriever` decode into a `Bitmap` | already on the player's surface; pausing neither decodes nor seeks |
 | Which frame is on screen | inferred from `currentPosition`, the media clock | reported by the renderer via `setVideoFrameMetadataListener` |
 | Stepping | `getFrameAtTime(OPTION_CLOSEST)`, a full GOP per step | `seekTo` on a warm, already-configured decoder |
-| Seek accuracy | `CLOSEST_SYNC` (nearest keyframe) | `SeekParameters.EXACT`, aimed at the middle of the target frame |
-| Position | `positionMs`, stepped by a truncated `msPerFrame` | `frameIndex`, with `Timeline.frameMidpointMs` / `frameStartMs` derived from the rational frame rate |
+| Seek accuracy | `CLOSEST_SYNC` (nearest keyframe) | `SeekParameters.EXACT`, aimed just under the target frame's own timestamp |
+| Position | `positionMs`, stepped by a truncated `msPerFrame` | `frameIndex`, with every timestamp derived from the rational frame rate |
 | Scrubber | milliseconds | frame indices, so the thumb can only land on a real frame |
 | Output view | `SurfaceView`, hidden on pause (which destroys its surface and rebuilds the codec's output every play/pause) | `TextureView`, permanently on screen |
 | Aspect ratio | stretched to the viewer | drawn into a box with the video's own display aspect, `pixelWidthHeightRatio` included |
@@ -98,6 +98,22 @@ rendered, so the app can read which frame is on the surface instead of inferring
 re-reads that value: no correcting seek, and nothing reaches the surface after the player stops. The
 clock is still the fallback, used when the two disagree by more than a second, which would mean a
 container whose frame timestamps are offset from the period.
+
+## Where to aim a seek
+
+Landing on a frame means satisfying two consumers that get there by different rules, and each of
+them cost a round of wrong guesses:
+
+* The **player** renders the first frame whose timestamp is at or **after** the seek position - not
+  the last one at or before it. Aiming at the middle of the frame's interval on that assumption
+  selected the next frame every single time, and for the final frame there was no frame at or after
+  the target at all, so nothing was rendered.
+* **`OPTION_CLOSEST`** picks the frame whose timestamp is *nearest* the target, which the interval
+  midpoint ties with the next frame's - a tie the platform breaks upwards.
+
+`Timeline.seekTargetMs` satisfies both: a quarter of a frame below the frame's own timestamp. That
+is at or before it, after the previous frame's, and nearer to it than to either neighbour, with room
+for the frame rate being an estimate derived from the container's frame count and duration.
 
 Reading that value back is its own trap. "Which frame contains this instant" and "which frame has
 this timestamp" are different questions: the first rounds down, but a container stores a frame's

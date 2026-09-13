@@ -192,7 +192,7 @@ class VideoPlayerState(val player: ExoPlayer) {
                 player.setMediaItem(MediaItem.fromUri(uri))
                 player.prepare()
                 player.playWhenReady = false
-                player.seekTo(Timeline.frameMidpointMs(0L, loaded.info.fps))
+                player.seekTo(Timeline.seekTargetMs(0L, loaded.info.fps))
             }
         }
         return opened.exceptionOrNull()
@@ -222,14 +222,14 @@ class VideoPlayerState(val player: ExoPlayer) {
         stopPlayback(settle = false)
         val target = index.coerceIn(0L, loaded.lastFrameIndex)
         frameIndex = target
-        player.seekTo(Timeline.frameMidpointMs(target, fps))
+        player.seekTo(Timeline.seekTargetMs(target, fps))
     }
 
     fun play() {
         if (info == null || isPlaying) return
         settleOnStop = false
         // Resume from the frame on screen rather than wherever the player drifted to.
-        val target = Timeline.frameMidpointMs(frameIndex, fps)
+        val target = Timeline.seekTargetMs(frameIndex, fps)
         if (abs(player.currentPosition - target) > Timeline.frameDurationMs(fps)) {
             player.seekTo(target)
         }

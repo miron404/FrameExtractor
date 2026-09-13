@@ -59,34 +59,31 @@ object Timeline {
     }
 
     /**
-     * Seek target for the **player**: the middle of frame [index]'s interval.
+     * Where to aim to land on frame [index] - for the player and for the frame extractor alike.
      *
-     * A position seek renders the last frame whose timestamp is at or before the target, so the
-     * target has to sit inside `[start of frame, start of next frame)`. Aiming at the boundary
-     * itself is a coin flip once timestamps are rounded to whole milliseconds - a target of 33 ms
-     * for a frame that actually starts at 33.33 ms renders the *previous* frame.
+     * The two get there differently, and the target has to satisfy both:
      *
-     * Do not use this to extract a frame; see [frameStartMs] for why.
+     * * The **player** renders the first frame whose timestamp is at or after the seek position.
+     *   (Not the last one at or before it. Aiming at the middle of the frame's interval on that
+     *   assumption selected the *next* frame every time, and for the final frame there was no frame
+     *   at or after the target at all, so nothing was rendered.)
+     * * `MediaMetadataRetriever.getFrameAtTime(.., OPTION_CLOSEST)` picks the frame whose timestamp
+     *   is *nearest* the target.
+     *
+     * So the target must sit just below frame [index]'s own timestamp: at or before it, after the
+     * previous frame's, and nearer to this one than to either neighbour. A quarter of a frame early
+     * satisfies all of that with room for the frame rate being a slight estimate - it is derived
+     * from the container's frame count and duration, and an error there accumulates over a long
+     * clip until a target computed from it crosses a frame boundary.
      */
-    fun frameMidpointMs(index: Long, fps: Float): Long {
-        if (index <= 0L) return ((0.5 * 1000.0) / sanitizeFps(fps).toDouble()).toLong()
+    fun seekTargetMs(index: Long, fps: Float): Long {
+        if (index <= 0L) return 0L
         val rate = sanitizeFps(fps).toDouble()
-        return ((index + 0.5) * 1000.0 / rate).toLong()
+        val quarterFrameMs = 250.0 / rate
+        return floor(index * 1000.0 / rate - quarterFrameMs).toLong().coerceAtLeast(0L)
     }
 
-    /**
-     * Frame [index]'s own timestamp: what the position readout shows, and the target to use when
-     * **extracting** a frame.
-     *
-     * `MediaMetadataRetriever.getFrameAtTime(.., OPTION_CLOSEST)` picks the frame whose *timestamp*
-     * is nearest to the target - it does not ask which frame's interval the target falls in. The
-     * midpoint from [frameMidpointMs] is therefore exactly equidistant between this frame's
-     * timestamp and the next one, and the platform breaks that tie upwards: at 30 fps that silently
-     * extracted the wrong frame for every index where the midpoint landed on a whole millisecond
-     * (1, 4, 7, ... - one frame in three). Landing just under the frame's own timestamp, which is
-     * what the truncation here does, is off by at most a millisecond against half a frame of
-     * tolerance.
-     */
+    /** Frame [index]'s own timestamp. Shown in the position readout; to seek, use [seekTargetMs]. */
     fun frameStartMs(index: Long, fps: Float): Long {
         if (index <= 0L) return 0L
         return (index * 1000.0 / sanitizeFps(fps).toDouble()).toLong()

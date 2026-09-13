@@ -4,6 +4,7 @@ import com.tailgunnerx.frameextractor.util.Timeline
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import kotlin.math.abs
 
 class TimelineTest {
 
@@ -30,16 +31,28 @@ class TimelineTest {
     }
 
     @Test
-    fun frameMidpointLandsBackOnItsOwnFrame() {
-        // The round trip index -> seek target -> index has to be the identity, or a step would
-        // sometimes decode the neighbouring frame.
+    fun theSeekTargetSelectsItsOwnFrameWhicheverWayTheSeekWorks() {
+        // Both consumers have to land on frame N from this one target, and they get there by
+        // different rules: the player renders the first frame at or after it, the extractor picks
+        // the frame with the nearest timestamp. Enshrining only one of those is how a seek to
+        // frame 29 ended up rendering frame 30.
         for (fps in listOf(23.976f, 24f, 25f, 29.97f, 30f, 50f, 59.94f, 60f, 120f)) {
-            for (index in listOf(0L, 1L, 29L, 30L, 31L, 999L, 1000L, 17_999L, 215_999L)) {
-                val midpoint = Timeline.frameMidpointMs(index, fps)
-                assertEquals(
-                    "fps=$fps index=$index midpoint=${midpoint}ms",
-                    index,
-                    Timeline.frameIndexAt(midpoint, fps),
+            for (index in 0L..300L) {
+                val target = Timeline.seekTargetMs(index, fps).toDouble()
+                val own = index * 1000.0 / fps
+                val previous = (index - 1L) * 1000.0 / fps
+                val next = (index + 1L) * 1000.0 / fps
+                val where = "fps=$fps index=$index target=$target own=$own"
+
+                // First frame at or after the target must be this one.
+                assertTrue("$where: target is past its own frame", target <= own)
+                assertTrue("$where: target is not past the previous frame", index == 0L || target > previous)
+
+                // Nearest timestamp to the target must also be this one.
+                assertTrue("$where: nearer the next frame", abs(target - own) < abs(target - next))
+                assertTrue(
+                    "$where: nearer the previous frame",
+                    index == 0L || abs(target - own) < abs(target - previous),
                 )
             }
         }
@@ -55,11 +68,16 @@ class TimelineTest {
         val lastFrame = Timeline.frameCount(durationMs, fps) - 1L
         assertEquals(17_999L, lastFrame)
 
-        val endOfClip = Timeline.frameMidpointMs(lastFrame, fps)
-        assertTrue("last frame midpoint ${endOfClip}ms fell outside the clip", endOfClip < durationMs)
+        // The last frame starts one frame before the end, and is reachable.
+        val lastFrameStart = Timeline.frameStartMs(lastFrame, fps)
+        assertEquals(599_966L, lastFrameStart)
         assertTrue(
-            "last frame midpoint ${endOfClip}ms is not within a frame of the end",
-            durationMs - endOfClip <= Timeline.frameDurationMs(fps) + 1L,
+            "the last frame starts ${durationMs - lastFrameStart}ms before the end",
+            durationMs - lastFrameStart <= Timeline.frameDurationMs(fps) + 1L,
+        )
+        assertTrue(
+            "the seek target for the last frame falls outside the clip",
+            Timeline.seekTargetMs(lastFrame, fps) < durationMs,
         )
     }
 
@@ -78,48 +96,6 @@ class TimelineTest {
         assertEquals(33L, Timeline.frameStartMs(1L, 30f))
         assertEquals(1000L, Timeline.frameStartMs(30L, 30f))
         assertEquals(599_966L, Timeline.frameStartMs(17_999L, 30f))
-    }
-
-    @Test
-    fun theExtractionTargetIsNearerItsOwnFrameThanTheNext() {
-        // MediaMetadataRetriever's OPTION_CLOSEST compares against frame *timestamps*, so the
-        // midpoint of a frame's interval ties exactly with the next frame's timestamp - and the
-        // platform breaks that tie upwards, extracting the wrong frame. The extraction target has
-        // to be unambiguously nearest to its own frame.
-        for (fps in listOf(23.976f, 24f, 25f, 29.97f, 30f, 50f, 59.94f, 60f, 120f)) {
-            for (index in 0L..200L) {
-                val target = Timeline.frameStartMs(index, fps).toDouble()
-                val ownTimestamp = index * 1000.0 / fps
-                val nextTimestamp = (index + 1L) * 1000.0 / fps
-                val previousTimestamp = (index - 1L) * 1000.0 / fps
-                assertTrue(
-                    "fps=$fps index=$index target=$target ties with the next frame",
-                    kotlin.math.abs(target - ownTimestamp) < kotlin.math.abs(target - nextTimestamp),
-                )
-                assertTrue(
-                    "fps=$fps index=$index target=$target ties with the previous frame",
-                    index == 0L ||
-                        kotlin.math.abs(target - ownTimestamp) < kotlin.math.abs(target - previousTimestamp),
-                )
-            }
-        }
-    }
-
-    @Test
-    fun aFrameTimestampMapsBackOntoItsOwnFrame() {
-        // Containers store a frame's timestamp truncated onto their time base, so it sits just below
-        // the ideal boundary - 966666us for a frame that ideally starts at 966666.67us. Rounding
-        // that down names the previous frame, which is what made a seek to frame 29 report 28.
-        for (fps in listOf(23.976f, 24f, 25f, 29.97f, 30f, 50f, 59.94f, 60f, 120f)) {
-            for (index in 0L..300L) {
-                val storedTimestampUs = (index * 1_000_000.0 / fps).toLong()
-                assertEquals(
-                    "fps=$fps index=$index pts=${storedTimestampUs}us",
-                    index,
-                    Timeline.frameIndexOfTimestampUs(storedTimestampUs, fps),
-                )
-            }
-        }
     }
 
     @Test
