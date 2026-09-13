@@ -5,6 +5,7 @@ import androidx.media3.exoplayer.ExoPlayer
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.tailgunnerx.frameextractor.ui.VideoPlayerState
+import com.tailgunnerx.frameextractor.util.Timeline
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
 import org.junit.After
@@ -106,7 +107,7 @@ class VideoPlayerStateTest {
         onMain { state.seekToFrame(start) }
         assertEquals(start, state.frameIndex)
 
-        onMain { state.setPlaybackFps(30f) }
+        runBlocking { state.applyPlaybackFps(30f) }
         onMain { state.play() }
 
         // Sample the position while it runs. With a sync-sample seek this drops straight back to
@@ -126,9 +127,9 @@ class VideoPlayerStateTest {
     }
 
     @Test
-    fun pausingKeepsTheFrameItStoppedOn() {
+    fun pausingSettlesOnTheFrameThePlayerActuallyStoppedOn() {
         onMain { state.seekToFrame(20L) }
-        onMain { state.setPlaybackFps(30f) }
+        runBlocking { state.applyPlaybackFps(30f) }
         onMain { state.play() }
         waitUntil("playback to move past frame 20") {
             state.syncFrameFromPlayer()
@@ -136,18 +137,23 @@ class VideoPlayerStateTest {
         }
 
         val atPause = onMain { state.pause(); state.frameIndex }
-        SystemClock.sleep(500L)
-        // Nothing may move the position after a pause - no background re-seek, no late poll.
-        assertEquals(atPause, onMain { state.frameIndex })
+        // pause() returns before the player stops - it still renders the frame it had queued - so
+        // the position is refined once it has really come to rest.
+        SystemClock.sleep(1_000L)
+        val settled = onMain { state.frameIndex }
+        assertTrue("settled backwards: paused at $atPause, settled on $settled", settled >= atPause)
+        assertTrue("settled $settled, more than a frame past the pause at $atPause", settled - atPause <= 1L)
 
-        // And the frame it reports has to be the frame the player is actually sitting on.
+        // The frame it reports has to be the frame the player is sitting on, or saving extracts a
+        // different frame from the one on screen.
         val fromPlayer = onMain {
-            com.tailgunnerx.frameextractor.util.Timeline.frameIndexAt(
-                state.player.currentPosition.coerceAtLeast(0L),
-                state.fps,
-            )
+            Timeline.frameIndexAt(state.player.currentPosition.coerceAtLeast(0L), state.fps)
         }
-        assertEquals(atPause, fromPlayer)
+        assertEquals(settled, fromPlayer)
+
+        // And nothing may move it afterwards.
+        SystemClock.sleep(500L)
+        assertEquals(settled, onMain { state.frameIndex })
     }
 
     @Test

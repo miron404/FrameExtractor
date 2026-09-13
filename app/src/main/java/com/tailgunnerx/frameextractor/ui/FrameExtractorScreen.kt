@@ -38,6 +38,8 @@ import com.tailgunnerx.frameextractor.media.FrameSaver
 import com.tailgunnerx.frameextractor.media.VideoInfo
 import com.tailgunnerx.frameextractor.util.Timeline
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 
@@ -84,7 +86,7 @@ fun FrameExtractorScreen(initialVideoUri: Uri? = null) {
             state.unload()
         } else {
             state.load(context, uri)?.let { error ->
-                Toast.makeText(context, "Could not open video: ${error.message}", Toast.LENGTH_LONG).show()
+                toast(context, "Could not open video: ${error.message}", Toast.LENGTH_LONG)
             }
         }
     }
@@ -93,13 +95,13 @@ fun FrameExtractorScreen(initialVideoUri: Uri? = null) {
     // user asks for a different frame.
     LaunchedEffect(state.isPlaying) {
         while (state.isPlaying) {
-            state.syncFrameFromPlayer()
+            state.pollPosition()
             delay(POSITION_POLL_MS)
         }
     }
 
     LaunchedEffect(playSpeedFps, state.info) {
-        state.setPlaybackFps(playSpeedFps)
+        state.applyPlaybackFps(playSpeedFps)
     }
 
     val saveFrame: () -> Unit = save@{
@@ -113,18 +115,18 @@ fun FrameExtractorScreen(initialVideoUri: Uri? = null) {
             return@save
         }
         state.pause()
-        // Aim at the middle of the frame on screen, the same target the player was seeked to, so the
-        // extracted file is the frame the user is looking at.
-        val timeMs = Timeline.frameMidpointMs(state.frameIndex, state.fps)
+        // The frame's own timestamp, not the middle of its interval: the retriever picks the frame
+        // with the nearest timestamp, and the midpoint ties with the next frame's. See Timeline.
+        val timeMs = Timeline.frameStartMs(state.frameIndex, state.fps)
         isExtracting = true
         scope.launch {
             try {
                 FrameSaver.saveFrame(context, active, timeMs)
-                Toast.makeText(context, "Saved frame to Pictures/FrameExtractor", Toast.LENGTH_SHORT).show()
+                toast(context, "Saved frame to Pictures/FrameExtractor", Toast.LENGTH_SHORT)
             } catch (cancellation: CancellationException) {
                 throw cancellation
             } catch (error: Throwable) {
-                Toast.makeText(context, "Error saving frame: ${error.message}", Toast.LENGTH_LONG).show()
+                toast(context, "Error saving frame: ${error.message}", Toast.LENGTH_LONG)
             } finally {
                 isExtracting = false
             }
@@ -176,6 +178,13 @@ fun FrameExtractorScreen(initialVideoUri: Uri? = null) {
         }
     }
 }
+
+/**
+ * A coroutine started from composition inherits whatever dispatcher the composition runs on, which
+ * is not necessarily a Looper thread - `Toast` throws on one that is not.
+ */
+private suspend fun toast(context: android.content.Context, message: String, length: Int) =
+    withContext(Dispatchers.Main) { Toast.makeText(context, message, length).show() }
 
 @Composable
 private fun TopBar(

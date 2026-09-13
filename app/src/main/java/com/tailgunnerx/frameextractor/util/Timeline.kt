@@ -37,10 +37,14 @@ object Timeline {
     }
 
     /**
-     * Timestamp in the *middle* of frame [index].
+     * Seek target for the **player**: the middle of frame [index]'s interval.
      *
-     * Seeking to a frame boundary is a coin flip once the container's timestamps are rounded to
-     * whole milliseconds; aiming at the midpoint lands unambiguously inside the intended frame.
+     * A position seek renders the last frame whose timestamp is at or before the target, so the
+     * target has to sit inside `[start of frame, start of next frame)`. Aiming at the boundary
+     * itself is a coin flip once timestamps are rounded to whole milliseconds - a target of 33 ms
+     * for a frame that actually starts at 33.33 ms renders the *previous* frame.
+     *
+     * Do not use this to extract a frame; see [frameStartMs] for why.
      */
     fun frameMidpointMs(index: Long, fps: Float): Long {
         if (index <= 0L) return ((0.5 * 1000.0) / sanitizeFps(fps).toDouble()).toLong()
@@ -48,7 +52,19 @@ object Timeline {
         return ((index + 0.5) * 1000.0 / rate).toLong()
     }
 
-    /** Timestamp frame [index] starts at. This is what the position readout shows. */
+    /**
+     * Frame [index]'s own timestamp: what the position readout shows, and the target to use when
+     * **extracting** a frame.
+     *
+     * `MediaMetadataRetriever.getFrameAtTime(.., OPTION_CLOSEST)` picks the frame whose *timestamp*
+     * is nearest to the target - it does not ask which frame's interval the target falls in. The
+     * midpoint from [frameMidpointMs] is therefore exactly equidistant between this frame's
+     * timestamp and the next one, and the platform breaks that tie upwards: at 30 fps that silently
+     * extracted the wrong frame for every index where the midpoint landed on a whole millisecond
+     * (1, 4, 7, ... - one frame in three). Landing just under the frame's own timestamp, which is
+     * what the truncation here does, is off by at most a millisecond against half a frame of
+     * tolerance.
+     */
     fun frameStartMs(index: Long, fps: Float): Long {
         if (index <= 0L) return 0L
         return (index * 1000.0 / sanitizeFps(fps).toDouble()).toLong()

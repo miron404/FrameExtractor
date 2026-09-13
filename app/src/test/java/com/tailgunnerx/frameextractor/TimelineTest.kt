@@ -81,6 +81,31 @@ class TimelineTest {
     }
 
     @Test
+    fun theExtractionTargetIsNearerItsOwnFrameThanTheNext() {
+        // MediaMetadataRetriever's OPTION_CLOSEST compares against frame *timestamps*, so the
+        // midpoint of a frame's interval ties exactly with the next frame's timestamp - and the
+        // platform breaks that tie upwards, extracting the wrong frame. The extraction target has
+        // to be unambiguously nearest to its own frame.
+        for (fps in listOf(23.976f, 24f, 25f, 29.97f, 30f, 50f, 59.94f, 60f, 120f)) {
+            for (index in 0L..200L) {
+                val target = Timeline.frameStartMs(index, fps).toDouble()
+                val ownTimestamp = index * 1000.0 / fps
+                val nextTimestamp = (index + 1L) * 1000.0 / fps
+                val previousTimestamp = (index - 1L) * 1000.0 / fps
+                assertTrue(
+                    "fps=$fps index=$index target=$target ties with the next frame",
+                    kotlin.math.abs(target - ownTimestamp) < kotlin.math.abs(target - nextTimestamp),
+                )
+                assertTrue(
+                    "fps=$fps index=$index target=$target ties with the previous frame",
+                    index == 0L ||
+                        kotlin.math.abs(target - ownTimestamp) < kotlin.math.abs(target - previousTimestamp),
+                )
+            }
+        }
+    }
+
+    @Test
     fun playbackSpeed_mapsDisplayFpsOntoSourceFps() {
         // 5 fps preview of 30 fps footage is a 6x slow motion.
         assertEquals(5f / 30f, Timeline.playbackSpeed(5f, 30f), 1e-6f)

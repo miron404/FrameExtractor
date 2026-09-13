@@ -2,6 +2,7 @@ package com.tailgunnerx.frameextractor.ui
 
 import android.content.Context
 import android.net.Uri
+import android.os.Handler
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
@@ -22,6 +23,8 @@ import com.tailgunnerx.frameextractor.media.VideoFrameDecoder
 import com.tailgunnerx.frameextractor.media.VideoInfo
 import com.tailgunnerx.frameextractor.util.Timeline
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.android.asCoroutineDispatcher
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 /**
@@ -74,6 +77,17 @@ class VideoPlayerState(val player: ExoPlayer) {
      *  first, so every entry point that touches the player has to tolerate being called after it. */
     private var released = false
 
+    /** Set when a pause is waiting for the player to actually come to a stop. */
+    private var settleOnStop = false
+
+    /**
+     * The player is confined to the thread it was built on and throws if touched from anywhere else.
+     * Click handlers are already on it; effects are not - a `LaunchedEffect` inherits whatever
+     * dispatcher the composition runs on, which under `createComposeRule` is a worker thread. So
+     * every entry point an effect can reach hops here rather than trusting its caller.
+     */
+    private val playerThread = Handler(player.applicationLooper).asCoroutineDispatcher()
+
     val fps: Float get() = info?.fps ?: Timeline.DEFAULT_FPS
     val lastFrameIndex: Long get() = info?.lastFrameIndex ?: 0L
 
@@ -88,6 +102,17 @@ class VideoPlayerState(val player: ExoPlayer) {
                 player.pause()
                 frameIndex = lastFrameIndex
             }
+        }
+
+        override fun onIsPlayingChanged(playing: Boolean) {
+            // pause() returns before the player stops: it still renders the frame it had queued, so
+            // the position read there can be a frame short of what ends up on screen. Saving that
+            // would extract a different frame from the one being looked at. Adopt what the player
+            // settled on, then snap exactly onto it.
+            if (playing || !settleOnStop || player.playWhenReady || info == null) return
+            settleOnStop = false
+            syncFrameFromPlayer()
+            player.seekTo(Timeline.frameMidpointMs(frameIndex, fps))
         }
 
         override fun onPlayerError(error: PlaybackException) {
@@ -118,35 +143,41 @@ class VideoPlayerState(val player: ExoPlayer) {
     }
 
     suspend fun load(context: Context, uri: Uri): Throwable? {
-        isPlaying = false
-        isLoading = true
-        playbackError = null
-        frameIndex = 0L
-        displayAspectRatio = 0f
-        info = null
-        closeDecoder()
+        withContext(playerThread) {
+            isPlaying = false
+            isLoading = true
+            playbackError = null
+            settleOnStop = false
+            frameIndex = 0L
+            displayAspectRatio = 0f
+            info = null
+            closeDecoder()
+        }
         val opened = try {
             Result.success(VideoFrameDecoder.open(context, uri))
         } catch (cancellation: CancellationException) {
-            isLoading = false
+            withContext(playerThread) { isLoading = false }
             throw cancellation
         } catch (t: Throwable) {
             Result.failure(t)
         }
-        isLoading = false
-        opened.onSuccess { loaded ->
-            decoder = loaded
-            info = loaded.info
-            player.setMediaItem(MediaItem.fromUri(uri))
-            player.prepare()
-            player.playWhenReady = false
-            player.seekTo(Timeline.frameMidpointMs(0L, loaded.info.fps))
+        withContext(playerThread) {
+            isLoading = false
+            opened.onSuccess { loaded ->
+                decoder = loaded
+                info = loaded.info
+                player.setMediaItem(MediaItem.fromUri(uri))
+                player.prepare()
+                player.playWhenReady = false
+                player.seekTo(Timeline.frameMidpointMs(0L, loaded.info.fps))
+            }
         }
         return opened.exceptionOrNull()
     }
 
     fun unload() {
         isPlaying = false
+        settleOnStop = false
         playbackError = null
         info = null
         frameIndex = 0L
@@ -161,17 +192,18 @@ class VideoPlayerState(val player: ExoPlayer) {
 
     /** Jumps to an absolute frame. Used by the scrubber. */
     fun seekToFrame(index: Long) {
-        if (info == null) return
-        pause()
-        val target = index.coerceIn(0L, lastFrameIndex)
+        val loaded = info ?: return
+        // settle = false: the user has named the frame, so a late "the player has stopped" callback
+        // must not overwrite it with wherever playback happened to end up.
+        stopPlayback(settle = false)
+        val target = index.coerceIn(0L, loaded.lastFrameIndex)
         frameIndex = target
-        // Aim at the middle of the frame: its boundary is a coin flip once container timestamps are
-        // rounded to whole milliseconds.
         player.seekTo(Timeline.frameMidpointMs(target, fps))
     }
 
     fun play() {
         if (info == null || isPlaying) return
+        settleOnStop = false
         // Resume from the frame on screen rather than wherever the player drifted to.
         val target = Timeline.frameMidpointMs(frameIndex, fps)
         if (abs(player.currentPosition - target) > Timeline.frameDurationMs(fps)) {
@@ -181,13 +213,16 @@ class VideoPlayerState(val player: ExoPlayer) {
         player.play()
     }
 
-    fun pause() {
+    fun pause() = stopPlayback(settle = true)
+
+    private fun stopPlayback(settle: Boolean) {
+        settleOnStop = settle
         if (!isPlaying) return
         isPlaying = false
         player.pause()
-        // Adopt whatever frame the surface is already showing. Deliberately no seek: re-seeking here
-        // is what used to make pausing stutter, and the rendered frame is already the right one.
-        syncFrameFromPlayer()
+        // Provisional: refined by onIsPlayingChanged once the player has really stopped. Still no
+        // re-decode - re-seeking to a freshly decoded still is what used to make pausing stutter.
+        if (settle) syncFrameFromPlayer()
     }
 
     fun togglePlay() = if (isPlaying) pause() else play()
@@ -199,9 +234,13 @@ class VideoPlayerState(val player: ExoPlayer) {
             .coerceIn(0L, lastFrameIndex)
     }
 
-    fun setPlaybackFps(displayFps: Float) {
+    /** Driven by an effect, so it cannot assume it is already on the player's thread. */
+    suspend fun applyPlaybackFps(displayFps: Float) = withContext(playerThread) {
         player.setPlaybackSpeed(Timeline.playbackSpeed(displayFps, fps))
     }
+
+    /** Driven by the position poll, which has the same problem. */
+    suspend fun pollPosition() = withContext(playerThread) { syncFrameFromPlayer() }
 
     fun release() {
         if (released) return
