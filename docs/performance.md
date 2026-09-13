@@ -64,6 +64,22 @@ Run everything the way CI does:
 
 The test clip can be regenerated with `python3 tools/generate_test_video.py` (needs ffmpeg + Pillow).
 
+## Measured on the CI emulator
+
+From the instrumented workflow (`api-level 30`, software H.264, `swiftshader`), against the 320x240
+test clip:
+
+```
+PERF stepping:          62.4ms per frame, 16 frames/s   (30 sequential uncached preview decodes)
+PERF preview decode:    avg=57.5ms worst=82ms over 19 seeks
+PERF frame accuracy:    8/12 exact, offsets=[0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0]
+```
+
+These are guard rails, not phone numbers: an emulator decodes with a host-side software codec, so
+per-seek cost dominates and the pixel count barely matters. What they do establish is that a seek
+tracks the timeline (never backwards, never more than a frame out), that stepping never waits on a
+queue, and that a preview stays close to what an exact full resolution decode returns.
+
 ## Known trade-offs
 
 * Zoom/pan applies to the paused still frame only. It is reset when playback starts, because the
