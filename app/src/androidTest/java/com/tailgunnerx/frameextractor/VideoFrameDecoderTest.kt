@@ -102,6 +102,7 @@ class VideoFrameDecoderTest {
         } finally {
             decoder.close()
         }
+        println("PERF frame accuracy: $exact/${requested.size} exact, offsets=$offsets")
         // Some platform extractors round a seek onto the neighbouring frame; anything worse than
         // that is a regression, and the reported offsets make the behaviour visible.
         assertTrue(
@@ -193,8 +194,31 @@ class VideoFrameDecoderTest {
         }
         val average = timings.average()
         val worst = timings.max()
-        println("preview decode: avg=${"%.1f".format(average)}ms worst=${worst}ms over ${timings.size} seeks")
+        println("PERF preview decode: avg=${"%.1f".format(average)}ms worst=${worst}ms over ${timings.size} seeks")
         assertTrue("average preview decode was ${average}ms", average < 400.0)
+    }
+
+    /**
+     * Sequential forward stepping with no cache hits: the path behind the next/previous frame
+     * buttons. Small clip on a software codec, so these are upper bounds rather than phone numbers.
+     */
+    @Test
+    fun frameSteppingHasUsableThroughput() = runBlocking {
+        val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
+        try {
+            decoder.decodePreview(TestVideo.midpointOf(0), maxDimensionPx = 160)
+            val steps = 30
+            val started = System.nanoTime()
+            for (index in 1 until steps) {
+                assertNotNull(decoder.decodePreview(TestVideo.midpointOf(index), maxDimensionPx = 160))
+            }
+            val totalMs = (System.nanoTime() - started) / 1_000_000.0
+            val perStep = totalMs / steps
+            println("PERF stepping: ${"%.1f".format(perStep)}ms per frame, ${"%.0f".format(1000.0 / perStep)} frames/s")
+            assertTrue("stepping took ${perStep}ms per frame", perStep < 400.0)
+        } finally {
+            decoder.close()
+        }
     }
 
     @Test
