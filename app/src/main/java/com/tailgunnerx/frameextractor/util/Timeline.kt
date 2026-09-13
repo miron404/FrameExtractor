@@ -1,10 +1,17 @@
 package com.tailgunnerx.frameextractor.util
 
-import androidx.compose.ui.unit.IntSize
 import java.util.Locale
+import kotlin.math.floor
+import kotlin.math.roundToLong
 
 /**
  * Frame <-> time arithmetic and playback speed mapping.
+ *
+ * The frame *index* is the unit the app thinks in; milliseconds are only ever derived from it.
+ * Doing it the other way around - keeping an integer "milliseconds per frame" and stepping by it -
+ * silently drifts, because no interesting frame rate divides 1000 evenly: 30 fps truncates to 33 ms
+ * and loses a frame every 30, so on a ten minute clip the last six seconds become unreachable and
+ * the frame counter is off by 180. Everything here is computed from the rational frame rate instead.
  *
  * Pure functions with no Android dependencies so they can be unit tested on the JVM.
  */
@@ -13,45 +20,53 @@ object Timeline {
     const val DEFAULT_FPS = 30f
     const val MIN_FPS = 1f
     const val MAX_FPS = 240f
-    const val MIN_MS_PER_FRAME = 1L
 
     /** Slowest/fastest playback speed we ask the video player for. */
     const val MIN_PLAYBACK_SPEED = 0.05f
     const val MAX_PLAYBACK_SPEED = 8f
 
-    /**
-     * Bounds for the resolution of decoded *preview* frames. Decoding at display resolution instead
-     * of the source resolution is by far the cheapest way to cut per-frame work: a 4K source is
-     * 8 MB per frame to allocate, convert and upload, while a preview only needs to fill a view.
-     */
-    const val MIN_PREVIEW_DIMENSION = 720
-    const val MAX_PREVIEW_DIMENSION = 1920
-
-    /** Fallback preview size before the viewer has been measured. */
-    const val FALLBACK_PREVIEW_DIMENSION = 1080
-
-    fun msPerFrame(fps: Float): Long =
-        if (fps.isFinite() && fps >= MIN_FPS) {
-            (1000f / fps).toLong().coerceAtLeast(MIN_MS_PER_FRAME)
-        } else {
-            (1000f / DEFAULT_FPS).toLong()
-        }
-
     /** Keeps metadata from broken containers (0 fps, NaN, absurd values) usable. */
     fun sanitizeFps(fps: Float?): Float =
         if (fps == null || !fps.isFinite() || fps <= 0f) DEFAULT_FPS else fps.coerceIn(MIN_FPS, MAX_FPS)
 
-    fun frameIndex(positionMs: Long, msPerFrame: Long): Long =
-        if (msPerFrame <= 0L) 0L else (positionMs / msPerFrame).coerceAtLeast(0L)
+    /** Index of the frame on screen at [positionMs]. */
+    fun frameIndexAt(positionMs: Long, fps: Float): Long {
+        if (positionMs <= 0L) return 0L
+        val rate = sanitizeFps(fps).toDouble()
+        return floor(positionMs * rate / 1000.0).toLong().coerceAtLeast(0L)
+    }
 
-    fun frameNumber(positionMs: Long, msPerFrame: Long): Long = frameIndex(positionMs, msPerFrame) + 1L
+    /**
+     * Timestamp in the *middle* of frame [index].
+     *
+     * Seeking to a frame boundary is a coin flip once the container's timestamps are rounded to
+     * whole milliseconds; aiming at the midpoint lands unambiguously inside the intended frame.
+     */
+    fun frameMidpointMs(index: Long, fps: Float): Long {
+        if (index <= 0L) return ((0.5 * 1000.0) / sanitizeFps(fps).toDouble()).toLong()
+        val rate = sanitizeFps(fps).toDouble()
+        return ((index + 0.5) * 1000.0 / rate).toLong()
+    }
 
-    fun totalFrames(durationMs: Long, msPerFrame: Long): Long =
-        if (msPerFrame <= 0L) 1L else (durationMs / msPerFrame).coerceAtLeast(0L) + 1L
+    /** Timestamp frame [index] starts at. This is what the position readout shows. */
+    fun frameStartMs(index: Long, fps: Float): Long {
+        if (index <= 0L) return 0L
+        return (index * 1000.0 / sanitizeFps(fps).toDouble()).toLong()
+    }
 
-    /** Moves [delta] frames from [positionMs], staying inside the clip. */
-    fun step(positionMs: Long, delta: Long, msPerFrame: Long, durationMs: Long): Long =
-        (positionMs + delta * msPerFrame).coerceIn(0L, durationMs.coerceAtLeast(0L))
+    /** How long a single frame lasts, in milliseconds. */
+    fun frameDurationMs(fps: Float): Long =
+        (1000.0 / sanitizeFps(fps).toDouble()).toLong().coerceAtLeast(1L)
+
+    /** Number of frames in a clip of [durationMs]; always at least one. */
+    fun frameCount(durationMs: Long, fps: Float): Long {
+        if (durationMs <= 0L) return 1L
+        val rate = sanitizeFps(fps).toDouble()
+        return (durationMs * rate / 1000.0).roundToLong().coerceAtLeast(1L)
+    }
+
+    /** Human facing frame number: 1-based, so "Frame 1" is the first frame. */
+    fun frameNumber(index: Long): Long = index + 1L
 
     /**
      * Playback speed that shows [displayFps] frames per second of a [videoFps] source.
@@ -62,31 +77,22 @@ object Timeline {
         return (displayFps / videoFps).coerceIn(MIN_PLAYBACK_SPEED, MAX_PLAYBACK_SPEED)
     }
 
-    /** Largest box with the aspect ratio of [width]x[height] that fits in a [maxDimension] square. */
-    fun fitWithin(width: Int, height: Int, maxDimension: Int): IntSize {
-        if (width <= 0 || height <= 0 || maxDimension <= 0) return IntSize(maxDimension, maxDimension)
-        if (width <= maxDimension && height <= maxDimension) return IntSize(width, height)
-        val scale = maxDimension.toFloat() / maxOf(width, height).toFloat()
-        return IntSize(
-            (width * scale).toInt().coerceAtLeast(1),
-            (height * scale).toInt().coerceAtLeast(1),
-        )
-    }
-
-    /** Preview decode box for a viewer measured at [viewerSize] pixels. */
-    fun previewDimension(viewerSize: IntSize): Int {
-        val longestSide = maxOf(viewerSize.width, viewerSize.height)
-        if (longestSide <= 0) return FALLBACK_PREVIEW_DIMENSION
-        return longestSide.coerceIn(MIN_PREVIEW_DIMENSION, MAX_PREVIEW_DIMENSION)
+    /** Aspect ratio a video of [width]x[height] with non-square pixels should be drawn at. */
+    fun displayAspectRatio(width: Int, height: Int, pixelWidthHeightRatio: Float): Float {
+        if (width <= 0 || height <= 0) return 0f
+        val par = if (pixelWidthHeightRatio.isFinite() && pixelWidthHeightRatio > 0f) {
+            pixelWidthHeightRatio
+        } else {
+            1f
+        }
+        return width * par / height
     }
 
     fun formatFps(fps: Float): String = String.format(Locale.US, "%.1f", fps)
 
     fun formatPosition(positionMs: Long): String {
-        val totalSeconds = (positionMs.coerceAtLeast(0L)) / 1000L
-        val minutes = totalSeconds / 60L
-        val seconds = totalSeconds % 60L
-        val millis = positionMs.coerceAtLeast(0L) % 1000L
-        return String.format(Locale.US, "%d:%02d.%03d", minutes, seconds, millis)
+        val safe = positionMs.coerceAtLeast(0L)
+        val totalSeconds = safe / 1000L
+        return String.format(Locale.US, "%d:%02d.%03d", totalSeconds / 60L, totalSeconds % 60L, safe % 1000L)
     }
 }

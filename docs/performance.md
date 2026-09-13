@@ -1,61 +1,68 @@
 # Performance notes
 
-Why frame stepping and video playback used to feel slow, and what changed.
+Why frame stepping and playback felt slow, and what the pipeline looks like now.
 
-## What was wrong
+## The shape of the problem
 
-1. **A permanent 16 ms polling loop ran a full seek every time it woke up.**
-   `LaunchedEffect(videoUri)` looped `while (true) { if (target != decoded) getFrameAtTime(...); delay(16) }`.
-   Every frame therefore cost a synchronous `MediaMetadataRetriever` seek, and the loop kept the
-   CPU busy even when nobody was touching the app.
+The screen used to run **two independent pipelines over the same clip**:
 
-2. **Frames were decoded at source resolution.** A 4K clip produced an 8 MB `ARGB_8888` bitmap per
-   step: allocated, colour converted, uploaded to the GPU and drawn into a viewport that is at most
-   a couple of megapixels. Every step paid for ~4x to ~8x more pixels than the screen could show.
+* `ExoPlayer` decoded playback onto a `SurfaceView`.
+* A `MediaMetadataRetriever` separately decoded a still `Bitmap` whenever the app was paused.
 
-3. **"Playback" was scrubbing.** Play mode incremented the position and re-decoded with
-   `OPTION_CLOSEST` for every displayed frame. There is no way `MediaMetadataRetriever` can decode
-   30 fps that way; the UI could only ever show a handful of frames per second, and each decode
-   blocked the previous one.
+Nothing kept the two in step, and most of the symptoms were downstream of that:
 
-4. **Stale work was not cancelled.** Requests were serialised behind one retriever, so a quick drag
-   over the timeline queued up decodes for positions the user had already left.
+1. **Pausing stuttered.** On pause the surface was hidden immediately and the *previous* still was
+   shown over it, while a fresh `MediaMetadataRetriever` seek ran; the correct frame only appeared
+   a few hundred milliseconds later.
+2. **Play jumped backwards.** The player was configured with `SeekParameters.CLOSEST_SYNC`, so
+   pressing play left the frame on screen and resumed from the nearest keyframe instead - up to a
+   whole GOP earlier.
+3. **The video was stretched.** A bare `SurfaceView` at `fillMaxSize()` does no letterboxing; that
+   is `AspectRatioFrameLayout`'s job inside media3's `PlayerView`. Stills were drawn with
+   `ContentScale.Fit`, so the picture also changed shape on every play/pause.
+4. **Stepping stayed slow no matter what.** `MediaMetadataRetriever.getFrameAtTime` seeks by
+   decoding forward from the preceding keyframe *every single call*, so a one frame step costs a
+   whole GOP. Decoding into a smaller box and caching the result cut the cost of the pixels, which
+   was never where the time went.
+5. **The timeline drifted off the frames.** Position was stepped by an integer "milliseconds per
+   frame", which truncates 33.33 to 33. That loses a frame every thirty: on a ten minute 30 fps clip
+   the counter ended up 180 frames short and the last six seconds could not be reached at all.
 
-5. **The main thread did the metadata read.** `setDataSource` + six `extractMetadata` calls ran
-   inside the file-picker callback, on the UI thread, for a file that can be hundreds of megabytes.
+## What it is now
 
-6. **The saved frame was the preview bitmap**, so the "lossless extraction" feature saved whatever
-   resolution the preview happened to be.
-
-## What changed
+**One pipeline.** The player's hardware decoder renders every frame the user ever sees, paused or
+playing, and the frame *index* is the only stored position - milliseconds are always derived from it.
 
 | Area | Before | After |
 | --- | --- | --- |
-| Still frames | `while(true) + delay(16)` polling | `snapshotFlow { SeekRequest(...) }.distinctUntilChanged().collectLatest { }` - decode only on real change, newest request wins |
-| Decode size | source resolution | into the viewer's pixel box (`Timeline.previewDimension`), at source resolution only when saving. A clip that already fits the view still goes through the exact `getFrameAtTime` path; the scaled accessor is used only when the frame is genuinely larger than the box |
-| Playback | re-seek per frame | `ExoPlayer` (media3) on a `SurfaceView`, hardware decoded, audio disabled, speed = `displayFps / videoFps` |
-| Position updates | one recomposition per decoded frame | player polled every 80 ms while playing |
-| Repeated frames | always re-decoded | `FrameCache` (48 MB LRU) keyed by frame index + preview size |
-| Metadata | main thread, inside the picker callback | `VideoFrameDecoder.open()` on `Dispatchers.IO` |
-| Thread safety | shared retriever, no serialisation | one retriever behind a coroutine `Mutex`; in-flight decodes finish before `close()` releases it |
-| Save | reused the preview bitmap, MediaStore entry with no path on API <= 28 | re-decodes at native resolution; MediaStore + `IS_PENDING` on API 29+, public Pictures file + media scan below |
-| Overview | - | `VideoInfo` reads resolution, rotation-corrected dimensions, fps and frame count once |
+| Paused frame | separate `MediaMetadataRetriever` decode into a `Bitmap` | already on the player's surface; pausing decodes nothing |
+| Stepping | `getFrameAtTime(OPTION_CLOSEST)`, a full GOP per step | `seekTo` on a warm, already-configured decoder |
+| Seek accuracy | `CLOSEST_SYNC` (nearest keyframe) | `SeekParameters.EXACT`, aimed at the middle of the target frame |
+| Position | `positionMs`, stepped by a truncated `msPerFrame` | `frameIndex`, with `Timeline.frameMidpointMs` / `frameStartMs` derived from the rational frame rate |
+| Scrubber | milliseconds | frame indices, so the thumb can only land on a real frame |
+| Output view | `SurfaceView`, hidden on pause (which destroys its surface and rebuilds the codec's output every play/pause) | `TextureView`, permanently on screen |
+| Aspect ratio | stretched to the viewer | drawn into a box with the video's own display aspect, `pixelWidthHeightRatio` included |
+| Zoom/pan | reset whenever playback started | kept; a `TextureView` composites like any other view |
+| State | ~12 `mutableStateOf`s in one 609 line composable | `VideoPlayerState` owns position and playback; the composables only draw |
+| `MediaMetadataRetriever` | on the interactive path | metadata at open, and one full resolution decode per saved frame |
 
-Decoding is also skipped entirely while the player is on screen, so playback and frame extraction no
-longer fight over the same hardware decoder.
+`FrameCache` and the `LruCache` behind it are gone: there is nothing left to cache, because no
+bitmap is decoded for display any more.
 
 ## How it is verified
 
-* `TimelineTest`, `LruCacheTest` - JVM unit tests for the frame/time arithmetic, the playback speed
-  mapping, the preview size bounds and the cache eviction policy.
-* `VideoFrameDecoderTest` (instrumented) - against a generated clip whose every frame carries its own
-  frame index in a black/white barcode, so a seek can be checked for returning the *right* frame. It
-  also asserts that previews are smaller than the source, that full decodes are not, and that a
-  preview decode stays inside a latency budget.
-* `FrameExtractorScreenTest` (instrumented) - drives the real screen: loading, frame stepping,
-  play/pause with the position actually advancing, and the speed controls.
-
-Run everything the way CI does:
+* `TimelineTest` - JVM unit tests for the frame/time arithmetic. Includes the regressions above:
+  that a frame index survives the round trip through its seek timestamp at 23.976/29.97/59.94 fps,
+  and that the last frame of a ten minute clip is reachable.
+* `VideoFrameDecoderTest` (instrumented) - extraction, against a generated clip whose every frame
+  carries its own frame index as a black/white barcode. `everyFrameIndexExtractsThatExactFrame`
+  walks all 60 frames **through `Timeline.frameMidpointMs` and the fps the app read from the
+  container**, rather than computing timestamps locally the way the previous version of this test
+  did - which is why that test could not see the app drifting a frame every thirty.
+* `VideoPlayerStateTest` (instrumented) - the interactive path. Starts playback from frame 45, which
+  the test clip places deep inside a GOP, and asserts the position never moves backwards; asserts a
+  pause keeps the frame it stopped on and that nothing re-seeks afterwards.
+* `FrameExtractorScreenTest` (instrumented) - drives the real screen end to end.
 
 ```
 ./gradlew assembleDebug testDebugUnitTest          # build + unit tests
@@ -64,33 +71,25 @@ Run everything the way CI does:
 
 The test clip can be regenerated with `python3 tools/generate_test_video.py` (needs ffmpeg + Pillow).
 
-## Measured on the CI emulator
+## Not measured
 
-From the instrumented workflow (`api-level 30`, software H.264, `swiftshader`), against the 320x240
-test clip:
+The previous version of this file quoted per-seek timings from the CI emulator. They described the
+`MediaMetadataRetriever` preview path, which no longer exists, and they were taken on a 320x240 clip
+decoded by a host-side software codec - where per-seek overhead dominates and resolution barely
+registers, so they said very little about a phone either way.
 
-```
-PERF stepping:          62.4ms per frame, 16 frames/s   (30 sequential uncached preview decodes)
-PERF preview decode:    avg=57.5ms worst=82ms over 19 seeks
-PERF frame accuracy:    8/12 exact, offsets=[0, 1, 0, 1, 0, 0, 0, 1, 0, 0, 1, 0]
-```
-
-These are guard rails, not phone numbers: an emulator decodes with a host-side software codec, so
-per-seek cost dominates and the pixel count barely matters. What they do establish is that a seek
-tracks the timeline (never backwards, never more than a frame out), that stepping never waits on a
-queue, and that a preview stays close to what an exact full resolution decode returns.
+Stepping latency is now a property of the player's seek on real hardware. **It has not been measured
+on a device**, and a CI emulator is the wrong place to try. If stepping still feels slow on real
+footage, the thing to look at first is media3's scrubbing mode (`setScrubbingModeEnabled`, added in
+media3 1.6.0), which keeps the decoder hot across a run of seeks; this project is pinned to 1.4.1,
+and moving up is likely to require raising `compileSdk`.
 
 ## Known trade-offs
 
-* Zoom/pan applies to the paused still frame only. It is reset when playback starts, because the
-  player renders through a `SurfaceView`, which cannot be transformed as cheaply as a texture.
-* Frames are still decoded through `MediaMetadataRetriever`, which seeks exactly
-  (`OPTION_CLOSEST`) but is not incremental. A `MediaCodec` + `ImageReader` pipeline that decodes
-  forward frame by frame could go faster for single-step scrubbing; it is a much larger change and
-  was left out.
-* For a source larger than the view, the preview uses the scaled accessor, which some platform
-  extractors round onto the neighbouring frame (up to ~33 ms at 30 fps). Saving always re-decodes
-  with the exact accessor, so extracted files are unaffected;
-  `scaledPreviewStaysWithinOneFrameOfTheExactFrame` bounds the drift.
+* A source whose rotation the codec does not apply itself (`VideoSize.unappliedRotationDegrees`)
+  is not rotated by the viewer. This was never handled, and correcting it means applying a rotate +
+  scale transform to the `TextureView` that cannot be verified without a device with such a clip.
+* A `TextureView` costs one more composite per frame than a `SurfaceView`. For a tool whose whole
+  job is sitting on a single frame and zooming into it, that is the right side of the trade.
 * Playback speed below ~0.1x is dominated by the player's frame scheduler rather than by decode
   throughput.

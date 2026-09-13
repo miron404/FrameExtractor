@@ -1,26 +1,11 @@
 package com.tailgunnerx.frameextractor
 
-import androidx.compose.ui.unit.IntSize
 import com.tailgunnerx.frameextractor.util.Timeline
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class TimelineTest {
-
-    @Test
-    fun msPerFrame_convertsCommonFrameRates() {
-        assertEquals(33L, Timeline.msPerFrame(30f))
-        assertEquals(16L, Timeline.msPerFrame(60f))
-        assertEquals(40L, Timeline.msPerFrame(25f))
-        assertEquals(500L, Timeline.msPerFrame(2f))
-    }
-
-    @Test
-    fun msPerFrame_neverReachesZeroForAbsurdFrameRates() {
-        assertEquals(Timeline.MIN_MS_PER_FRAME, Timeline.msPerFrame(10_000f))
-        assertEquals(Timeline.MIN_MS_PER_FRAME, Timeline.msPerFrame(Float.MAX_VALUE))
-    }
 
     @Test
     fun sanitizeFps_fallsBackForBrokenMetadata() {
@@ -34,34 +19,65 @@ class TimelineTest {
     }
 
     @Test
-    fun frameNumberAndIndex_areConsistent() {
-        val msPerFrame = Timeline.msPerFrame(30f)
-        assertEquals(1L, Timeline.frameNumber(0L, msPerFrame))
-        assertEquals(2L, Timeline.frameNumber(33L, msPerFrame))
-        assertEquals(2L, Timeline.frameNumber(65L, msPerFrame))
-        assertEquals(0L, Timeline.frameIndex(0L, msPerFrame))
-        // Positions inside the same frame map to the same frame index, which is what lets the
-        // decoder skip re-decoding while the timeline is dragged by a few milliseconds.
-        assertEquals(
-            Timeline.frameIndex(100L, msPerFrame),
-            Timeline.frameIndex(120L, msPerFrame),
+    fun frameIndexAt_mapsEveryPositionInsideAFrameOntoThatFrame() {
+        // 30 fps: frame 0 covers [0, 33.3), frame 1 covers [33.3, 66.6), ...
+        assertEquals(0L, Timeline.frameIndexAt(0L, 30f))
+        assertEquals(0L, Timeline.frameIndexAt(33L, 30f))
+        assertEquals(1L, Timeline.frameIndexAt(34L, 30f))
+        assertEquals(1L, Timeline.frameIndexAt(66L, 30f))
+        assertEquals(2L, Timeline.frameIndexAt(67L, 30f))
+        assertEquals(0L, Timeline.frameIndexAt(-100L, 30f))
+    }
+
+    @Test
+    fun frameMidpointLandsBackOnItsOwnFrame() {
+        // The round trip index -> seek target -> index has to be the identity, or a step would
+        // sometimes decode the neighbouring frame.
+        for (fps in listOf(23.976f, 24f, 25f, 29.97f, 30f, 50f, 59.94f, 60f, 120f)) {
+            for (index in listOf(0L, 1L, 29L, 30L, 31L, 999L, 1000L, 17_999L, 215_999L)) {
+                val midpoint = Timeline.frameMidpointMs(index, fps)
+                assertEquals(
+                    "fps=$fps index=$index midpoint=${midpoint}ms",
+                    index,
+                    Timeline.frameIndexAt(midpoint, fps),
+                )
+            }
+        }
+    }
+
+    @Test
+    fun steppingDoesNotDriftOverALongClip() {
+        // The regression this replaces: an integer 33 ms per frame loses a frame every 30, so on a
+        // ten minute 30 fps clip the counter ended up 180 frames short and the last six seconds were
+        // unreachable. Walking the whole clip has to land exactly on the last frame.
+        val fps = 30f
+        val durationMs = 10L * 60L * 1000L
+        val lastFrame = Timeline.frameCount(durationMs, fps) - 1L
+        assertEquals(17_999L, lastFrame)
+
+        val endOfClip = Timeline.frameMidpointMs(lastFrame, fps)
+        assertTrue("last frame midpoint ${endOfClip}ms fell outside the clip", endOfClip < durationMs)
+        assertTrue(
+            "last frame midpoint ${endOfClip}ms is not within a frame of the end",
+            durationMs - endOfClip <= Timeline.frameDurationMs(fps) + 1L,
         )
     }
 
     @Test
-    fun totalFrames_countsInclusiveEnd() {
-        val msPerFrame = Timeline.msPerFrame(30f)
-        assertEquals(61L, Timeline.totalFrames(2000L, msPerFrame))
-        assertEquals(1L, Timeline.totalFrames(0L, msPerFrame))
+    fun frameCount_matchesDurationTimesFrameRate() {
+        assertEquals(60L, Timeline.frameCount(2000L, 30f))
+        assertEquals(18_000L, Timeline.frameCount(600_000L, 30f))
+        assertEquals(1L, Timeline.frameCount(0L, 30f))
+        // 29.97 fps for exactly ten minutes of NTSC video.
+        assertEquals(17_982L, Timeline.frameCount(600_000L, 29.97f))
     }
 
     @Test
-    fun step_clampsInsideTheClip() {
-        val msPerFrame = Timeline.msPerFrame(30f)
-        assertEquals(0L, Timeline.step(0L, -5L, msPerFrame, 2000L))
-        assertEquals(2000L, Timeline.step(2000L, 5L, msPerFrame, 2000L))
-        assertEquals(66L, Timeline.step(33L, 1L, msPerFrame, 2000L))
-        assertEquals(0L, Timeline.step(33L, -1L, msPerFrame, 2000L))
+    fun frameStartMs_isTheFramesOwnTimestamp() {
+        assertEquals(0L, Timeline.frameStartMs(0L, 30f))
+        assertEquals(33L, Timeline.frameStartMs(1L, 30f))
+        assertEquals(1000L, Timeline.frameStartMs(30L, 30f))
+        assertEquals(599_966L, Timeline.frameStartMs(17_999L, 30f))
     }
 
     @Test
@@ -80,28 +96,15 @@ class TimelineTest {
     }
 
     @Test
-    fun fitWithin_preservesAspectRatioAndSize() {
-        assertEquals(IntSize(160, 90), Timeline.fitWithin(1920, 1080, 160))
-        // Portrait sources keep their aspect ratio too.
-        assertEquals(IntSize(90, 160), Timeline.fitWithin(1080, 1920, 160))
-        // Sources smaller than the box are left alone: never upscale a decode.
-        assertEquals(IntSize(320, 240), Timeline.fitWithin(320, 240, 1080))
-        assertEquals(IntSize(1920, 1080), Timeline.fitWithin(1920, 1080, 1920))
-    }
-
-    @Test
-    fun fitWithin_survivesMissingMetadata() {
-        assertEquals(IntSize(720, 720), Timeline.fitWithin(0, 0, 720))
-    }
-
-    @Test
-    fun previewDimension_isBoundedByTheViewAndSaneLimits() {
-        assertEquals(Timeline.MIN_PREVIEW_DIMENSION, Timeline.previewDimension(IntSize(200, 100)))
-        assertEquals(Timeline.MAX_PREVIEW_DIMENSION, Timeline.previewDimension(IntSize(3840, 2160)))
-        // A tall phone view is bounded by the cap, not by the width.
-        assertEquals(Timeline.MAX_PREVIEW_DIMENSION, Timeline.previewDimension(IntSize(1440, 2960)))
-        assertEquals(1440, Timeline.previewDimension(IntSize(1080, 1440)))
-        assertEquals(Timeline.FALLBACK_PREVIEW_DIMENSION, Timeline.previewDimension(IntSize.Zero))
+    fun displayAspectRatio_appliesPixelAspectAndSurvivesMissingMetadata() {
+        assertEquals(16f / 9f, Timeline.displayAspectRatio(1920, 1080, 1f), 1e-6f)
+        assertEquals(9f / 16f, Timeline.displayAspectRatio(1080, 1920, 1f), 1e-6f)
+        // Anamorphic NTSC DVD: 720x480 stored pixels at a 32:27 pixel aspect, displayed 16:9.
+        assertEquals(16f / 9f, Timeline.displayAspectRatio(720, 480, 32f / 27f), 1e-4f)
+        // An unreported pixel aspect must not collapse the ratio to zero or infinity.
+        assertEquals(16f / 9f, Timeline.displayAspectRatio(1920, 1080, 0f), 1e-6f)
+        assertEquals(16f / 9f, Timeline.displayAspectRatio(1920, 1080, Float.NaN), 1e-6f)
+        assertEquals(0f, Timeline.displayAspectRatio(0, 0, 1f), 1e-6f)
     }
 
     @Test

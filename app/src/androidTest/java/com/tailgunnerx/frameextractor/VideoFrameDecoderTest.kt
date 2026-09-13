@@ -1,28 +1,25 @@
 package com.tailgunnerx.frameextractor
 
-import android.graphics.Bitmap
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import com.tailgunnerx.frameextractor.media.VideoFrameDecoder
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.async
+import com.tailgunnerx.frameextractor.util.Timeline
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
-import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import kotlin.math.abs
 
 /**
- * Exercises the decoding path against a real clip.
+ * Exercises the extraction path against a real clip.
  *
- * Two things are being protected here: that seeking still returns the *right* frame (the app's whole
- * point), and that previews are decoded at view resolution rather than source resolution - the fix
- * for laggy scrubbing and the thing most likely to silently regress.
+ * This decoder is no longer on the interactive path - what the user sees is rendered by the player -
+ * so what matters here is that the frame written to disk is the frame that was asked for, at full
+ * resolution.
  */
 @RunWith(AndroidJUnit4::class)
 class VideoFrameDecoderTest {
@@ -38,39 +35,18 @@ class VideoFrameDecoderTest {
             assertEquals(TestVideo.WIDTH, info.displayWidth)
             assertEquals(TestVideo.HEIGHT, info.displayHeight)
             assertTrue("fps was ${info.fps}", abs(info.fps - TestVideo.FPS) <= 1.5f)
-            info.frameCount?.let { assertEquals(TestVideo.FRAME_COUNT.toLong(), it) }
-            assertEquals(33L, info.msPerFrame)
+            assertEquals(TestVideo.FRAME_COUNT.toLong(), info.totalFrames)
+            assertEquals(TestVideo.FRAME_COUNT.toLong() - 1L, info.lastFrameIndex)
         } finally {
             decoder.close()
         }
     }
 
     @Test
-    fun decodePreview_isScaledDownToTheRequestedBox() = runBlocking {
+    fun decodeFrame_usesTheSourceResolution() = runBlocking {
         val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
         try {
-            val preview = decoder.decodePreview(TestVideo.midpointOf(10), maxDimensionPx = 160)
-            assertNotNull("no preview frame decoded", preview)
-            preview!!
-            val longestSide = maxOf(preview.width, preview.height)
-            assertTrue(
-                "preview was ${preview.width}x${preview.height}, expected it to fit in a 160 box",
-                longestSide <= 160,
-            )
-            assertTrue(
-                "preview ${preview.width}x${preview.height} was not smaller than the 320x240 source",
-                preview.width * preview.height < TestVideo.WIDTH * TestVideo.HEIGHT,
-            )
-        } finally {
-            decoder.close()
-        }
-    }
-
-    @Test
-    fun decodeFull_usesTheSourceResolution() = runBlocking {
-        val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
-        try {
-            val frame = decoder.decodeFull(TestVideo.midpointOf(3))
+            val frame = decoder.decodeFrame(TestVideo.midpointOf(3))
             assertNotNull(frame)
             assertEquals(TestVideo.WIDTH, frame!!.width)
             assertEquals(TestVideo.HEIGHT, frame.height)
@@ -79,75 +55,44 @@ class VideoFrameDecoderTest {
         }
     }
 
+    /**
+     * The end-to-end check that "frame N" means the same thing to the app as it does to the file.
+     *
+     * Deliberately goes through [Timeline.frameMidpointMs] and the fps the app read from the
+     * container, rather than computing a timestamp locally: the previous version of this test did
+     * its own arithmetic in doubles and so could not see that the app itself was stepping by a
+     * truncated integer number of milliseconds and drifting a frame every thirty.
+     */
     @Test
-    fun seekReturnsTheRequestedFrameWithinOneFrame() = runBlocking {
-        // A clip that already fits the requested box is decoded through the plain frame accessor,
-        // so this is also the check that the exact-seeking path still works.
+    fun everyFrameIndexExtractsThatExactFrame() = runBlocking {
         val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
-        val requested = listOf(0, 1, 2, 7, 15, 29, 30, 31, 44, 45, 58, 59)
-        var exact = 0
-        val offsets = mutableListOf<Int>()
+        val mismatches = mutableListOf<Pair<Long, Int>>()
         try {
-            for (index in requested) {
-                val frame = decoder.decodePreview(TestVideo.midpointOf(index), maxDimensionPx = TestVideo.WIDTH)
-                assertNotNull("no frame decoded for index $index", frame)
+            for (index in 0L until decoder.info.totalFrames) {
+                val timeMs = Timeline.frameMidpointMs(index, decoder.info.fps)
+                val frame = decoder.decodeFrame(timeMs)
+                assertNotNull("no frame decoded for index $index (${timeMs}ms)", frame)
                 val decoded = TestVideo.barcodeIndexOf(frame!!)
-                offsets += decoded - index
-                if (decoded == index) exact++
-                assertTrue(
-                    "asked for frame $index, decoder returned $decoded",
-                    abs(decoded - index) <= 1,
-                )
+                if (decoded.toLong() != index) mismatches += index to decoded
             }
         } finally {
             decoder.close()
         }
-        println("PERF frame accuracy: $exact/${requested.size} exact, offsets=$offsets")
-        // Some platform extractors round a seek onto the neighbouring frame; anything worse than
-        // that is a regression, and the reported offsets make the behaviour visible.
         assertTrue(
-            "only $exact/${requested.size} seeks returned the exact frame, offsets=$offsets",
-            exact * 2 >= requested.size,
+            "asked for frames 0..${TestVideo.FRAME_COUNT - 1} and got ${mismatches.size} wrong: $mismatches",
+            mismatches.isEmpty(),
         )
     }
 
+    /** The last frame has to be reachable: truncated frame arithmetic used to make it unreachable. */
     @Test
-    fun seekingTracksTheTimelineAcrossTheWholeClip() = runBlocking {
+    fun theLastFrameIsReachable() = runBlocking {
         val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
-        val decodedIndices = mutableListOf<Int>()
         try {
-            for (index in 0 until TestVideo.FRAME_COUNT) {
-                val frame = decoder.decodePreview(TestVideo.midpointOf(index), maxDimensionPx = 320)
-                assertNotNull("no frame decoded for index $index", frame)
-                decodedIndices += TestVideo.barcodeIndexOf(frame!!)
-            }
-        } finally {
-            decoder.close()
-        }
-        val backwards = decodedIndices.zipWithNext().filter { (first, second) -> second < first }
-        assertTrue("seeking went backwards: $backwards (indices=$decodedIndices)", backwards.isEmpty())
-
-        val worstOffset = decodedIndices.withIndex().maxOf { (index, decoded) -> abs(decoded - index) }
-        assertTrue("worst seek offset was $worstOffset frames", worstOffset <= 1)
-    }
-
-    @Test
-    fun scaledPreviewStaysWithinOneFrameOfTheExactFrame() = runBlocking {
-        // The preview path trades a little accuracy for a lot of speed on large sources; it must
-        // never drift further than a single frame from what a full resolution decode returns.
-        val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
-        val drifts = mutableListOf<Int>()
-        try {
-            for (index in 0 until TestVideo.FRAME_COUNT step 7) {
-                val time = TestVideo.midpointOf(index)
-                val preview = decoder.decodePreview(time, maxDimensionPx = 80)
-                val full = decoder.decodeFull(time)
-                assertNotNull(preview)
-                assertNotNull(full)
-                val drift = TestVideo.barcodeIndexOf(preview!!) - TestVideo.barcodeIndexOf(full!!)
-                drifts += drift
-                assertTrue("preview drifted $drift frames at index $index", abs(drift) <= 1)
-            }
+            val last = decoder.info.lastFrameIndex
+            val frame = decoder.decodeFrame(Timeline.frameMidpointMs(last, decoder.info.fps))
+            assertNotNull(frame)
+            assertEquals(last, TestVideo.barcodeIndexOf(frame!!).toLong())
         } finally {
             decoder.close()
         }
@@ -157,65 +102,12 @@ class VideoFrameDecoderTest {
     fun repeatedSeeksAreDeterministic() = runBlocking {
         val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
         try {
-            val time = TestVideo.midpointOf(17)
-            val first = decoder.decodePreview(time, maxDimensionPx = 160)
-            val second = decoder.decodePreview(time, maxDimensionPx = 160)
+            val time = Timeline.frameMidpointMs(17L, decoder.info.fps)
+            val first = decoder.decodeFrame(time)
+            val second = decoder.decodeFrame(time)
             assertNotNull(first)
             assertNotNull(second)
             assertEquals(TestVideo.barcodeIndexOf(first!!), TestVideo.barcodeIndexOf(second!!))
-        } finally {
-            decoder.close()
-        }
-    }
-
-    /**
-     * Not a benchmark - emulators are far slower than phones - but a guard rail: if previews ever
-     * start being decoded at source resolution, or seeks start queueing behind each other, these
-     * numbers explode.
-     */
-    @Test
-    fun previewDecodeStaysWithinABudget() = runBlocking {
-        val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
-        val timings = mutableListOf<Long>()
-        try {
-            // Warm up on a keyframe.
-            decoder.decodePreview(0L, maxDimensionPx = 160)
-
-            for (index in 1 until 20) {
-                val started = System.nanoTime()
-                val frame = decoder.decodePreview(TestVideo.midpointOf(index + 20), maxDimensionPx = 160)
-                val elapsedMs = (System.nanoTime() - started) / 1_000_000
-                assertNotNull(frame)
-                timings += elapsedMs
-                assertTrue("a single preview decode took ${elapsedMs}ms", elapsedMs < 1_500L)
-            }
-        } finally {
-            decoder.close()
-        }
-        val average = timings.average()
-        val worst = timings.max()
-        println("PERF preview decode: avg=${"%.1f".format(average)}ms worst=${worst}ms over ${timings.size} seeks")
-        assertTrue("average preview decode was ${average}ms", average < 400.0)
-    }
-
-    /**
-     * Sequential forward stepping with no cache hits: the path behind the next/previous frame
-     * buttons. Small clip on a software codec, so these are upper bounds rather than phone numbers.
-     */
-    @Test
-    fun frameSteppingHasUsableThroughput() = runBlocking {
-        val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
-        try {
-            decoder.decodePreview(TestVideo.midpointOf(0), maxDimensionPx = 160)
-            val steps = 30
-            val started = System.nanoTime()
-            for (index in 1 until steps) {
-                assertNotNull(decoder.decodePreview(TestVideo.midpointOf(index), maxDimensionPx = 160))
-            }
-            val totalMs = (System.nanoTime() - started) / 1_000_000.0
-            val perStep = totalMs / steps
-            println("PERF stepping: ${"%.1f".format(perStep)}ms per frame, ${"%.0f".format(1000.0 / perStep)} frames/s")
-            assertTrue("stepping took ${perStep}ms per frame", perStep < 400.0)
         } finally {
             decoder.close()
         }
@@ -225,45 +117,12 @@ class VideoFrameDecoderTest {
     fun decodeAfterCloseReturnsNothing() = runBlocking {
         val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
         decoder.close()
-        var frame: Bitmap? = null
+        var frame = decoder.decodeFrame(0L)
         repeat(20) {
-            frame = decoder.decodePreview(0L, maxDimensionPx = 160)
             if (frame == null) return@repeat
             delay(50)
+            frame = decoder.decodeFrame(0L)
         }
         assertNull("a closed decoder still produced frames", frame)
-    }
-
-    @Test
-    fun concurrentSeeksOnlyProduceTheLastFrame() = runBlocking {
-        // Mirrors what scrubbing does: many overlapping requests, all but the newest irrelevant.
-        val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
-        try {
-            val jobs = (0 until 8).map { index ->
-                async(Dispatchers.Default) {
-                    decoder.decodePreview(TestVideo.midpointOf(index * 5), maxDimensionPx = 160)
-                }
-            }
-            val frames = jobs.map { it.await() }
-            assertTrue("decoder returned no frames under concurrent use", frames.any { it != null })
-        } finally {
-            decoder.close()
-        }
-    }
-
-    @Test
-    fun frameCacheServesRepeatedFrameIndices() = runBlocking {
-        val decoder = VideoFrameDecoder.open(context, TestVideo.copyToCache())
-        try {
-            val cache = com.tailgunnerx.frameextractor.media.FrameCache(maxBytes = 4L * 1024L * 1024L)
-            val time = TestVideo.midpointOf(12)
-            val decoded = decoder.decodePreview(time, maxDimensionPx = 160)!!
-            cache.put(frameIndex = 12L, dimension = 160, bitmap = decoded)
-            assertSame(decoded, cache.get(frameIndex = 12L, dimension = 160))
-            assertNull(cache.get(frameIndex = 12L, dimension = 720))
-            assertNull(cache.get(frameIndex = 13L, dimension = 160))
-        } finally {
-            decoder.close()
-        }
     }
 }

@@ -17,9 +17,12 @@ data class VideoInfo(
     val fps: Float,
     val frameCount: Long?,
 ) {
-    val msPerFrame: Long = Timeline.msPerFrame(fps)
-
     val hasSize: Boolean = displayWidth > 0 && displayHeight > 0
+
+    /** Total frames, preferring the container's own count over one derived from duration x fps. */
+    val totalFrames: Long = frameCount?.takeIf { it > 0L } ?: Timeline.frameCount(durationMs, fps)
+
+    val lastFrameIndex: Long = (totalFrames - 1L).coerceAtLeast(0L)
 
     val resolutionLabel: String = if (hasSize) "${displayWidth}x$displayHeight" else "Unknown"
 

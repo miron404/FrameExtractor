@@ -4,8 +4,6 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.media.MediaMetadataRetriever
 import android.net.Uri
-import android.os.Build
-import androidx.compose.ui.unit.IntSize
 import com.tailgunnerx.frameextractor.util.Timeline
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -16,12 +14,16 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 
 /**
- * Owns a [MediaMetadataRetriever] for one video source and serialises access to it.
+ * Reads a clip's metadata, and decodes single frames at native resolution when one is extracted.
  *
- * `MediaMetadataRetriever` is **not** thread safe, and every method on it blocks for tens to
- * hundreds of milliseconds while the decoder seeks. All of that now happens off the main thread,
- * behind a mutex, and callers can cancel a request simply by cancelling their coroutine - which is
- * what makes scrubbing feel responsive instead of queueing up stale frames.
+ * This is deliberately *not* on the interactive path any more. `MediaMetadataRetriever` seeks by
+ * decoding forward from the preceding keyframe every single time, so a one frame step costs a whole
+ * GOP - which is why stepping stayed slow no matter how small the bitmaps got. What the user sees is
+ * now rendered by the player's own hardware decoder (see `FrameExtractorScreen`), and the retriever
+ * is only asked for a frame when one is being saved, where a few hundred milliseconds cost nothing.
+ *
+ * `MediaMetadataRetriever` is not thread safe, so access is serialised behind a mutex and kept off
+ * the main thread.
  */
 class VideoFrameDecoder private constructor(
     private val retriever: MediaMetadataRetriever,
@@ -37,23 +39,8 @@ class VideoFrameDecoder private constructor(
     @Volatile
     private var closed = false
 
-    /**
-     * Decodes the frame closest to [timeMs] scaled to fit a [maxDimensionPx] box.
-     *
-     * Decoding at view resolution instead of source resolution is the single biggest win for
-     * scrubbing: it avoids allocating, colour converting and uploading huge bitmaps for a view
-     * that cannot show them.
-     */
-    suspend fun decodePreview(timeMs: Long, maxDimensionPx: Int): Bitmap? = withContext(Dispatchers.IO) {
-        mutex.withLock {
-            if (closed) return@withLock null
-            val target = previewTargetSize(maxDimensionPx)
-            decodeScaled(timeMs, target.width, target.height)
-        }
-    }
-
-    /** Decodes at the source's native resolution. Used when saving a frame, never for previews. */
-    suspend fun decodeFull(timeMs: Long): Bitmap? = withContext(Dispatchers.IO) {
+    /** Decodes the frame at [timeMs] at the source's native resolution. */
+    suspend fun decodeFrame(timeMs: Long): Bitmap? = withContext(Dispatchers.IO) {
         mutex.withLock {
             if (closed) return@withLock null
             runCatching {
@@ -73,46 +60,24 @@ class VideoFrameDecoder private constructor(
         }
     }
 
-    private fun previewTargetSize(maxDimensionPx: Int): IntSize =
-        if (info.hasSize) {
-            Timeline.fitWithin(info.displayWidth, info.displayHeight, maxDimensionPx)
-        } else {
-            IntSize(maxDimensionPx, maxDimensionPx)
-        }
-
-    private fun decodeScaled(timeMs: Long, width: Int, height: Int): Bitmap? {
-        val timeUs = timeMs * 1000L
-        // Only ask for a scaled frame when the frame really is bigger than the box. The scaled
-        // accessor (API 27+) is what makes a 4K source cheap to scrub, but it is also the less
-        // precise of the two paths - so a clip that already fits the view is decoded with the
-        // plain, exactly seeking accessor.
-        val needsDownscale = info.hasSize && (width < info.displayWidth || height < info.displayHeight)
-        if (needsDownscale && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O_MR1) {
-            val scaled = runCatching {
-                retriever.getScaledFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST, width, height)
-            }.getOrNull()
-            if (scaled != null) return scaled
-        }
-        val full = runCatching {
-            retriever.getFrameAtTime(timeUs, MediaMetadataRetriever.OPTION_CLOSEST)
-        }.getOrNull() ?: return null
-        if (!needsDownscale || (full.width <= width && full.height <= height)) return full
-        return runCatching {
-            Bitmap.createScaledBitmap(full, width, height, true)
-        }.getOrNull() ?: full
-    }
-
     companion object {
 
         /**
          * Opens [uri] and reads its metadata. Blocking work happens on the IO dispatcher so the
          * picker callback never stalls the frame that is being drawn.
          */
-        suspend fun open(context: Context, uri: Uri): VideoFrameDecoder = withContext(Dispatchers.IO) {
+        suspend fun open(context: Context, uri: Uri): VideoFrameDecoder {
+            // The retriever is constructed here rather than inside withContext on purpose. If the
+            // caller is cancelled while the IO block is running, withContext discards whatever the
+            // block returned and throws instead - which, with the retriever created in there, would
+            // strand an open one. Opening a clip and immediately picking another one is exactly the
+            // case that does this.
             val retriever = MediaMetadataRetriever()
             try {
-                retriever.setDataSource(context.applicationContext, uri)
-                VideoFrameDecoder(retriever, readInfo(retriever))
+                return withContext(Dispatchers.IO) {
+                    retriever.setDataSource(context.applicationContext, uri)
+                    VideoFrameDecoder(retriever, readInfo(retriever))
+                }
             } catch (t: Throwable) {
                 runCatching { retriever.release() }
                 throw t

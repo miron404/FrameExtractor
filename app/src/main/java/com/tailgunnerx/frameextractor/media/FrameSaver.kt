@@ -17,16 +17,16 @@ import java.io.IOException
 /**
  * Writes a frame to the shared Pictures collection as a lossless PNG.
  *
- * The frame is decoded again at the video's native resolution here: the preview bitmap shown on
- * screen is intentionally scaled down, so saving it would silently downgrade "extract at original
- * resolution".
+ * The frame is decoded at the video's native resolution here rather than read back from the
+ * viewer: what is on screen is the player's output, sized to the view, so saving that would
+ * silently downgrade "extract at original resolution".
  */
 object FrameSaver {
 
     private const val ALBUM = "FrameExtractor"
 
     suspend fun saveFrame(context: Context, decoder: VideoFrameDecoder, timeMs: Long): Uri {
-        val bitmap = decoder.decodeFull(timeMs)
+        val bitmap = decoder.decodeFrame(timeMs)
             ?: throw IOException("Could not decode a frame at ${timeMs}ms")
         val fileName = "ExtractedFrame_${timeMs}ms.png"
         return withContext(Dispatchers.IO) {
